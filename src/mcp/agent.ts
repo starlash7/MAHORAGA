@@ -3,12 +3,14 @@ import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import type { Env } from "../env.d";
 import { ErrorCode } from "../lib/errors";
-import { generateId, hmacVerify } from "../lib/utils";
+import { generateId, hmacVerify, parseBoolean } from "../lib/utils";
 import { consumeApprovalToken, generateApprovalToken, validateApprovalToken } from "../policy/approval";
 import { getDefaultPolicyConfig, type PolicyConfig } from "../policy/config";
 import { PolicyEngine } from "../policy/engine";
 import { createAlpacaProviders } from "../providers/alpaca";
 import { getDTE } from "../providers/alpaca/options";
+import { createBrokerProviders, getBrokerProviderName } from "../providers/broker";
+import { createKalshiClient, type KalshiClient } from "../providers/kalshi/client";
 import { classifyEvent, generateResearchReport, summarizeLearnedRules } from "../providers/llm/classifier";
 import { createLLMProvider } from "../providers/llm/factory";
 import { extractFinancialData, isAllowedDomain, scrapeUrl } from "../providers/scraper";
@@ -38,6 +40,111 @@ import { createTrade } from "../storage/d1/queries/trades";
 import type { OptionsOrderPreview } from "./types";
 import { failure, success } from "./types";
 
+interface KalshiMarketPayload {
+  market?: {
+    ticker?: string;
+    title?: string;
+    yes_bid?: number | null;
+    yes_ask?: number | null;
+    last_price?: number | null;
+    status?: string;
+  };
+  markets?: Array<{
+    ticker?: string;
+    title?: string;
+    yes_bid?: number | null;
+    yes_ask?: number | null;
+    last_price?: number | null;
+    status?: string;
+  }>;
+  ticker?: string;
+  title?: string;
+  yes_bid?: number | null;
+  yes_ask?: number | null;
+  last_price?: number | null;
+  status?: string;
+}
+
+interface PredictionMarketSnapshot {
+  symbol: string;
+  title: string | null;
+  yesBid: number | null;
+  yesAsk: number | null;
+  lastPrice: number | null;
+  probability: number | null;
+  spreadCents: number | null;
+  status: string | null;
+}
+
+const DEFAULT_PREDICTION_WATCHLIST = ["USREC-2026", "FEDCUT-2026Q2", "BTC-2026-120K", "SNP-2026-6500"];
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function asFinite(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function parsePredictionWatchlist(raw: string | undefined): string[] {
+  if (!raw || raw.trim().length === 0) return DEFAULT_PREDICTION_WATCHLIST;
+  const parts = raw
+    .split(",")
+    .map((entry) => entry.trim().toUpperCase())
+    .filter((entry) => entry.length > 0);
+  return parts.length > 0 ? Array.from(new Set(parts)) : DEFAULT_PREDICTION_WATCHLIST;
+}
+
+function deterministicMockProbability(symbol: string): number {
+  let hash = 0;
+  for (const ch of symbol) {
+    hash = (hash * 31 + ch.charCodeAt(0)) % 10000;
+  }
+  const base = 0.2 + (hash % 6000) / 10000;
+  const oscillation = Math.sin(Date.now() / 240000 + hash / 333) * 0.04;
+  return clamp(base + oscillation, 0.03, 0.97);
+}
+
+function parsePredictionMarketPayload(symbol: string, payload: unknown): PredictionMarketSnapshot | null {
+  if (!payload || typeof payload !== "object") return null;
+  const body = payload as KalshiMarketPayload;
+  const market = body.market ?? body.markets?.[0] ?? body;
+
+  const yesBid = asFinite(market.yes_bid);
+  const yesAsk = asFinite(market.yes_ask);
+  const lastPrice = asFinite(market.last_price);
+
+  let probability: number | null = null;
+  if (yesBid !== null && yesAsk !== null && yesBid > 0 && yesAsk > 0) {
+    probability = (yesBid + yesAsk) / 200;
+  } else if (yesAsk !== null && yesAsk > 0) {
+    probability = yesAsk / 100;
+  } else if (yesBid !== null && yesBid > 0) {
+    probability = yesBid / 100;
+  } else if (lastPrice !== null && lastPrice > 0) {
+    probability = lastPrice / 100;
+  }
+
+  const spreadCents =
+    yesBid !== null && yesAsk !== null && yesBid > 0 && yesAsk > 0 ? Math.max(0, Math.round(yesAsk - yesBid)) : null;
+
+  return {
+    symbol: (market.ticker || symbol).toUpperCase(),
+    title: typeof market.title === "string" ? market.title : null,
+    yesBid,
+    yesAsk,
+    lastPrice,
+    probability: probability !== null ? clamp(probability, 0.01, 0.99) : null,
+    spreadCents,
+    status: typeof market.status === "string" ? market.status : null,
+  };
+}
+
 export class MahoragaMcpAgent extends McpAgent<Env> {
   server = new McpServer({
     name: "mahoraga",
@@ -49,12 +156,15 @@ export class MahoragaMcpAgent extends McpAgent<Env> {
 
   private llm: LLMProvider | null = null;
   private options: OptionsProvider | null = null;
+  private kalshiClient: KalshiClient | null = null;
 
   async init() {
     this.requestId = generateId();
 
     const db = createD1Client(this.env.DB);
     const alpaca = createAlpacaProviders(this.env);
+    const brokerProviders = createBrokerProviders(this.env);
+    const brokerName = getBrokerProviderName(this.env);
 
     const storedPolicy = await getPolicyConfig(db);
     this.policyConfig = storedPolicy ?? getDefaultPolicyConfig(this.env);
@@ -77,7 +187,70 @@ export class MahoragaMcpAgent extends McpAgent<Env> {
     this.registerNewsTools(db);
     this.registerResearchTools(db, alpaca);
     this.registerOptionsTools();
-    this.registerUtilityTools();
+    this.registerPredictionMarketTools(db, brokerProviders);
+    this.registerUtilityTools(brokerName);
+  }
+
+  private getKalshiClient(): KalshiClient | null {
+    if (parseBoolean(this.env.KALSHI_MOCK_MODE, true)) return null;
+    if (!this.env.KALSHI_API_KEY_ID || !this.env.KALSHI_API_PRIVATE_KEY) return null;
+    if (!this.kalshiClient) {
+      this.kalshiClient = createKalshiClient({
+        accessKeyId: this.env.KALSHI_API_KEY_ID,
+        privateKey: this.env.KALSHI_API_PRIVATE_KEY,
+        baseUrl: this.env.KALSHI_BASE_URL,
+      });
+    }
+    return this.kalshiClient;
+  }
+
+  private async fetchPredictionMarketSnapshot(symbol: string): Promise<PredictionMarketSnapshot | null> {
+    const normalized = symbol.trim().toUpperCase();
+    if (!normalized) return null;
+
+    if (parseBoolean(this.env.KALSHI_MOCK_MODE, true)) {
+      const probability = deterministicMockProbability(normalized);
+      return {
+        symbol: normalized,
+        title: normalized,
+        yesBid: Math.round(probability * 100) - 2,
+        yesAsk: Math.round(probability * 100) + 2,
+        lastPrice: Math.round(probability * 100),
+        probability,
+        spreadCents: 4,
+        status: "open",
+      };
+    }
+
+    const client = this.getKalshiClient();
+    if (!client) return null;
+    const payload = await client.get<unknown>(`/trade-api/v2/markets/${encodeURIComponent(normalized)}`);
+    return parsePredictionMarketPayload(normalized, payload);
+  }
+
+  private async fetchPredictionMarketSnapshots(symbols: string[]): Promise<Record<string, PredictionMarketSnapshot>> {
+    const uniqueSymbols = Array.from(
+      new Set(symbols.map((symbol) => symbol.trim().toUpperCase()).filter((symbol) => symbol.length > 0))
+    );
+    if (uniqueSymbols.length === 0) return {};
+
+    const entries = await Promise.all(
+      uniqueSymbols.map(async (symbol) => {
+        try {
+          const snapshot = await this.fetchPredictionMarketSnapshot(symbol);
+          return snapshot ? ([symbol, snapshot] as const) : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    const out: Record<string, PredictionMarketSnapshot> = {};
+    for (const entry of entries) {
+      if (!entry) continue;
+      out[entry[0]] = entry[1];
+    }
+    return out;
   }
 
   private registerAuthTools(db: ReturnType<typeof createD1Client>, alpaca: ReturnType<typeof createAlpacaProviders>) {
@@ -117,7 +290,9 @@ export class MahoragaMcpAgent extends McpAgent<Env> {
     this.server.tool("user-get", "Get user/session information and system configuration", {}, async () => {
       const result = success({
         environment: this.env.ENVIRONMENT,
+        broker: getBrokerProviderName(this.env),
         paper_trading: this.env.ALPACA_PAPER === "true",
+        prediction_mock_mode: parseBoolean(this.env.KALSHI_MOCK_MODE, true),
         features: {
           llm_research: this.env.FEATURE_LLM_RESEARCH === "true",
           options: this.env.FEATURE_OPTIONS === "true",
@@ -754,13 +929,722 @@ export class MahoragaMcpAgent extends McpAgent<Env> {
     );
   }
 
-  private registerUtilityTools() {
+  private registerPredictionMarketTools(db: D1Client, providers: ReturnType<typeof createBrokerProviders>) {
+    const isKalshiBroker = providers.name === "kalshi";
+
+    this.server.tool(
+      "prediction-markets-list",
+      "List tracked Kalshi prediction markets with probability, spread, and held-position overlay",
+      {
+        symbols: z.array(z.string()).max(50).optional(),
+        include_positions: z.boolean().default(true),
+        limit: z.number().min(1).max(50).default(20),
+      },
+      async ({ symbols, include_positions, limit }) => {
+        const startTime = Date.now();
+        if (!isKalshiBroker) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  failure({
+                    code: ErrorCode.NOT_SUPPORTED,
+                    message: "prediction-markets-list is only available when BROKER_PROVIDER=kalshi",
+                  }),
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        try {
+          const positions = include_positions ? await providers.trading.getPositions() : [];
+          const heldSymbols = positions.map((position) => position.symbol.toUpperCase());
+          const configuredSymbols =
+            symbols && symbols.length > 0
+              ? symbols.map((symbol) => symbol.trim().toUpperCase()).filter((symbol) => symbol.length > 0)
+              : parsePredictionWatchlist(this.env.KALSHI_MARKETS_WATCHLIST);
+          const targetSymbols = Array.from(new Set([...configuredSymbols, ...heldSymbols])).slice(0, limit);
+          const snapshots = await this.fetchPredictionMarketSnapshots(targetSymbols);
+          const positionBySymbol = new Map(positions.map((position) => [position.symbol.toUpperCase(), position]));
+
+          const markets = targetSymbols.map((symbol) => {
+            const snapshot = snapshots[symbol] ?? null;
+            const position = positionBySymbol.get(symbol) ?? null;
+            return {
+              symbol,
+              title: snapshot?.title ?? null,
+              status: snapshot?.status ?? "unknown",
+              probability: snapshot?.probability ?? null,
+              probability_pct:
+                snapshot?.probability !== null && snapshot?.probability !== undefined
+                  ? Number((snapshot.probability * 100).toFixed(2))
+                  : null,
+              yes_bid: snapshot?.yesBid ?? null,
+              yes_ask: snapshot?.yesAsk ?? null,
+              spread_cents: snapshot?.spreadCents ?? null,
+              held_qty: position?.qty ?? 0,
+              held_side: position?.prediction_outcome ?? null,
+              held_market_value: position?.market_value ?? 0,
+            };
+          });
+
+          const result = success({
+            broker: providers.name,
+            mode: parseBoolean(this.env.KALSHI_MOCK_MODE, true) ? "mock" : "live",
+            count: markets.length,
+            markets,
+          });
+
+          await insertToolLog(db, {
+            request_id: this.requestId,
+            tool_name: "prediction-markets-list",
+            input: { symbols, include_positions, limit },
+            output: result,
+            latency_ms: Date.now() - startTime,
+            provider_calls: 2 + targetSymbols.length,
+          });
+
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(failure({ code: ErrorCode.PROVIDER_ERROR, message: String(error) }), null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    );
+
+    this.server.tool(
+      "prediction-market-get",
+      "Get one Kalshi market with current position and open-order context",
+      { symbol: z.string().min(1) },
+      async ({ symbol }) => {
+        const startTime = Date.now();
+        if (!isKalshiBroker) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  failure({
+                    code: ErrorCode.NOT_SUPPORTED,
+                    message: "prediction-market-get is only available when BROKER_PROVIDER=kalshi",
+                  }),
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        try {
+          const normalized = symbol.trim().toUpperCase();
+          const [snapshot, position, openOrders] = await Promise.all([
+            this.fetchPredictionMarketSnapshot(normalized),
+            providers.trading.getPosition(normalized),
+            providers.trading.listOrders({ status: "open", limit: 200, symbols: [normalized] }),
+          ]);
+
+          const result = success({
+            broker: providers.name,
+            mode: parseBoolean(this.env.KALSHI_MOCK_MODE, true) ? "mock" : "live",
+            market: {
+              symbol: normalized,
+              title: snapshot?.title ?? null,
+              status: snapshot?.status ?? "unknown",
+              probability: snapshot?.probability ?? null,
+              probability_pct:
+                snapshot?.probability !== null && snapshot?.probability !== undefined
+                  ? Number((snapshot.probability * 100).toFixed(2))
+                  : null,
+              yes_bid: snapshot?.yesBid ?? null,
+              yes_ask: snapshot?.yesAsk ?? null,
+              spread_cents: snapshot?.spreadCents ?? null,
+            },
+            position: position
+              ? {
+                  qty: position.qty,
+                  side: position.prediction_outcome ?? "yes",
+                  avg_entry_price: position.avg_entry_price,
+                  current_price: position.current_price,
+                  market_value: position.market_value,
+                  unrealized_pl: position.unrealized_pl,
+                  unrealized_plpc: position.unrealized_plpc,
+                }
+              : null,
+            open_orders: openOrders.map((order) => ({
+              id: order.id,
+              side: order.side,
+              qty: order.qty,
+              type: order.type,
+              time_in_force: order.time_in_force,
+              status: order.status,
+              created_at: order.created_at,
+            })),
+          });
+
+          await insertToolLog(db, {
+            request_id: this.requestId,
+            tool_name: "prediction-market-get",
+            input: { symbol: normalized },
+            output: result,
+            latency_ms: Date.now() - startTime,
+            provider_calls: 3,
+          });
+
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(failure({ code: ErrorCode.PROVIDER_ERROR, message: String(error) }), null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    );
+
+    this.server.tool(
+      "prediction-portfolio-get",
+      "Get Kalshi account + prediction-position portfolio snapshot",
+      {},
+      async () => {
+        const startTime = Date.now();
+        if (!isKalshiBroker) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  failure({
+                    code: ErrorCode.NOT_SUPPORTED,
+                    message: "prediction-portfolio-get is only available when BROKER_PROVIDER=kalshi",
+                  }),
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        try {
+          const [account, positions, clock] = await Promise.all([
+            providers.trading.getAccount(),
+            providers.trading.getPositions(),
+            providers.trading.getClock(),
+          ]);
+          const yesCount = positions.filter((position) => (position.prediction_outcome || "yes") === "yes").length;
+          const noCount = positions.filter((position) => position.prediction_outcome === "no").length;
+          const totalExposure = positions.reduce((sum, position) => sum + Math.abs(position.market_value), 0);
+
+          const result = success({
+            broker: providers.name,
+            mode: parseBoolean(this.env.KALSHI_MOCK_MODE, true) ? "mock" : "live",
+            account: {
+              equity: account.equity,
+              cash: account.cash,
+              buying_power: account.buying_power,
+              portfolio_value: account.portfolio_value,
+            },
+            market: {
+              is_open: clock.is_open,
+              timestamp: clock.timestamp,
+              next_open: clock.next_open,
+              next_close: clock.next_close,
+            },
+            summary: {
+              position_count: positions.length,
+              yes_positions: yesCount,
+              no_positions: noCount,
+              total_exposure_usd: Number(totalExposure.toFixed(2)),
+            },
+            positions: positions.map((position) => ({
+              symbol: position.symbol,
+              qty: position.qty,
+              side: position.prediction_outcome ?? "yes",
+              avg_entry_price: position.avg_entry_price,
+              current_price: position.current_price,
+              market_value: position.market_value,
+              unrealized_pl: position.unrealized_pl,
+              unrealized_plpc: position.unrealized_plpc,
+            })),
+          });
+
+          await insertToolLog(db, {
+            request_id: this.requestId,
+            tool_name: "prediction-portfolio-get",
+            input: {},
+            output: result,
+            latency_ms: Date.now() - startTime,
+            provider_calls: 3,
+          });
+
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(failure({ code: ErrorCode.PROVIDER_ERROR, message: String(error) }), null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    );
+
+    this.server.tool(
+      "prediction-risk-status",
+      "Get risk state and prediction-specific exposure summary",
+      {},
+      async () => {
+        if (!isKalshiBroker) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  failure({
+                    code: ErrorCode.NOT_SUPPORTED,
+                    message: "prediction-risk-status is only available when BROKER_PROVIDER=kalshi",
+                  }),
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+        try {
+          const [riskState, account, positions, openOrders] = await Promise.all([
+            getRiskState(db),
+            providers.trading.getAccount(),
+            providers.trading.getPositions(),
+            providers.trading.listOrders({ status: "open", limit: 200 }),
+          ]);
+          const totalExposure = positions.reduce((sum, position) => sum + Math.abs(position.market_value), 0);
+          const dailyLossPct = account.equity > 0 ? riskState.daily_loss_usd / account.equity : 0;
+
+          const result = success({
+            kill_switch: { active: riskState.kill_switch_active, reason: riskState.kill_switch_reason },
+            daily_loss: {
+              usd: riskState.daily_loss_usd,
+              pct: dailyLossPct,
+              limit_pct: this.policyConfig!.max_daily_loss_pct,
+            },
+            exposure: {
+              positions: positions.length,
+              open_orders: openOrders.length,
+              total_exposure_usd: Number(totalExposure.toFixed(2)),
+            },
+            limits: {
+              max_notional_per_trade: this.policyConfig!.max_notional_per_trade,
+              max_position_pct_equity: this.policyConfig!.max_position_pct_equity,
+              max_open_positions: this.policyConfig!.max_open_positions,
+            },
+          });
+
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(failure({ code: ErrorCode.INTERNAL_ERROR, message: String(error) }), null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    );
+
+    this.server.tool(
+      "prediction-order-preview",
+      "Preview Kalshi prediction order, validate policy, and return approval token",
+      {
+        symbol: z.string().min(1),
+        side: z.enum(["buy", "sell"]).default("buy"),
+        qty: z.number().positive().optional(),
+        notional: z.number().positive().optional(),
+        order_type: z.enum(["market", "limit"]).default("market"),
+        limit_price: z.number().positive().optional(),
+        time_in_force: z.enum(["ioc", "gtc", "fok"]).default("ioc"),
+      },
+      async (input) => {
+        const startTime = Date.now();
+        if (!isKalshiBroker) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  failure({
+                    code: ErrorCode.NOT_SUPPORTED,
+                    message: "prediction-order-preview is only available when BROKER_PROVIDER=kalshi",
+                  }),
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        try {
+          if (!input.qty && !input.notional) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    failure({ code: ErrorCode.INVALID_INPUT, message: "Either qty or notional is required" }),
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const normalizedSymbol = input.symbol.trim().toUpperCase();
+          const [account, positions, clock, riskState, snapshot] = await Promise.all([
+            providers.trading.getAccount(),
+            providers.trading.getPositions(),
+            providers.trading.getClock(),
+            getRiskState(db),
+            this.fetchPredictionMarketSnapshot(normalizedSymbol).catch(() => null),
+          ]);
+
+          const estimatedPrice = input.limit_price ?? snapshot?.probability ?? 0.5;
+          const estimatedCost = input.notional ?? (input.qty ?? 0) * estimatedPrice;
+
+          const preview = {
+            symbol: normalizedSymbol,
+            asset_class: "prediction" as const,
+            side: input.side,
+            qty: input.qty,
+            notional: input.notional,
+            order_type: input.order_type,
+            limit_price: input.limit_price,
+            time_in_force: input.time_in_force,
+            estimated_price: estimatedPrice,
+            estimated_cost: estimatedCost,
+          };
+
+          const policyEngine = new PolicyEngine(this.policyConfig!);
+          const policyResult = policyEngine.evaluate({ order: preview, account, positions, clock, riskState });
+
+          if (policyResult.allowed) {
+            const approval = await generateApprovalToken({
+              preview,
+              policyResult,
+              secret: this.env.KILL_SWITCH_SECRET,
+              db,
+              ttlSeconds: this.policyConfig!.approval_token_ttl_seconds,
+            });
+            policyResult.approval_token = approval.token;
+            policyResult.approval_id = approval.approval_id;
+            policyResult.expires_at = approval.expires_at;
+          }
+
+          const result = success({
+            preview,
+            policy: policyResult,
+            market_context: {
+              probability: snapshot?.probability ?? null,
+              status: snapshot?.status ?? "unknown",
+            },
+          });
+
+          await insertToolLog(db, {
+            request_id: this.requestId,
+            tool_name: "prediction-order-preview",
+            input,
+            output: result,
+            latency_ms: Date.now() - startTime,
+            provider_calls: 5,
+          });
+
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(failure({ code: ErrorCode.INTERNAL_ERROR, message: String(error) }), null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    );
+
+    this.server.tool(
+      "prediction-order-submit",
+      "Submit a Kalshi prediction order using approval token from prediction-order-preview",
+      { approval_token: z.string().min(1) },
+      async ({ approval_token }) => {
+        const startTime = Date.now();
+        if (!isKalshiBroker) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  failure({
+                    code: ErrorCode.NOT_SUPPORTED,
+                    message: "prediction-order-submit is only available when BROKER_PROVIDER=kalshi",
+                  }),
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        try {
+          const riskState = await getRiskState(db);
+          if (riskState.kill_switch_active) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    failure({
+                      code: ErrorCode.KILL_SWITCH_ACTIVE,
+                      message: riskState.kill_switch_reason ?? "Kill switch active",
+                    }),
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const validation = await validateApprovalToken({
+            token: approval_token,
+            secret: this.env.KILL_SWITCH_SECRET,
+            db,
+          });
+          if (!validation.valid) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    failure({ code: ErrorCode.INVALID_APPROVAL_TOKEN, message: validation.reason ?? "Invalid token" }),
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const orderParams = validation.order_params!;
+          if (orderParams.asset_class !== "prediction") {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    failure({
+                      code: ErrorCode.INVALID_INPUT,
+                      message: "Approval token is not for prediction-market order",
+                    }),
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          if (orderParams.order_type !== "market" && orderParams.order_type !== "limit") {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    failure({
+                      code: ErrorCode.INVALID_INPUT,
+                      message: "Kalshi prediction orders support only market/limit",
+                    }),
+                    null,
+                    2
+                  ),
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          const order = await providers.trading.createOrder({
+            symbol: orderParams.symbol,
+            qty: orderParams.qty,
+            notional: orderParams.notional,
+            side: orderParams.side,
+            type: orderParams.order_type,
+            time_in_force: orderParams.time_in_force,
+            limit_price: orderParams.limit_price,
+            stop_price: orderParams.stop_price,
+            client_order_id: validation.approval_id,
+          });
+
+          await consumeApprovalToken(db, validation.approval_id!);
+          await createTrade(db, {
+            approval_id: validation.approval_id,
+            alpaca_order_id: order.id,
+            symbol: order.symbol,
+            side: order.side,
+            qty: order.qty ? parseFloat(order.qty) : undefined,
+            notional: orderParams.notional,
+            order_type: order.type,
+            status: order.status,
+          });
+
+          const result = success({
+            message: "Prediction order submitted",
+            order: {
+              id: order.id,
+              symbol: order.symbol,
+              side: order.side,
+              qty: order.qty,
+              type: order.type,
+              status: order.status,
+            },
+          });
+
+          await insertToolLog(db, {
+            request_id: this.requestId,
+            tool_name: "prediction-order-submit",
+            input: { approval_token: "[REDACTED]" },
+            output: result,
+            latency_ms: Date.now() - startTime,
+            provider_calls: 2,
+          });
+
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(failure({ code: ErrorCode.PROVIDER_ERROR, message: String(error) }), null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    );
+
+    this.server.tool(
+      "prediction-position-close",
+      "Close prediction position by symbol (full or partial)",
+      {
+        symbol: z.string().min(1),
+        qty: z.number().positive().optional(),
+        percentage: z.number().min(0).max(100).optional(),
+      },
+      async ({ symbol, qty, percentage }) => {
+        if (!isKalshiBroker) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  failure({
+                    code: ErrorCode.NOT_SUPPORTED,
+                    message: "prediction-position-close is only available when BROKER_PROVIDER=kalshi",
+                  }),
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        try {
+          const normalized = symbol.trim().toUpperCase();
+          const riskState = await getRiskState(db);
+          const order = await providers.trading.closePosition(normalized, qty, percentage);
+          const result = success({
+            message: "Prediction position close order submitted",
+            kill_switch_active: riskState.kill_switch_active,
+            order: {
+              id: order.id,
+              symbol: order.symbol,
+              status: order.status,
+            },
+          });
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(failure({ code: ErrorCode.PROVIDER_ERROR, message: String(error) }), null, 2),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+    );
+  }
+
+  private registerUtilityTools(brokerName: "alpaca" | "kalshi") {
     this.server.tool("help-usage", "Get help information about using Mahoraga", {}, async () => {
       const result = success({
         name: "Mahoraga MCP Trading Server",
         version: "0.1.0",
-        order_flow: ["1. orders-preview -> get approval_token", "2. orders-submit with token"],
-        quick_start: ["auth-verify", "portfolio-get", "risk-status", "orders-preview", "orders-submit"],
+        order_flow:
+          brokerName === "kalshi"
+            ? ["1. prediction-order-preview -> get approval_token", "2. prediction-order-submit with token"]
+            : ["1. orders-preview -> get approval_token", "2. orders-submit with token"],
+        broker: brokerName,
+        quick_start:
+          brokerName === "kalshi"
+            ? [
+                "prediction-markets-list",
+                "prediction-portfolio-get",
+                "prediction-risk-status",
+                "prediction-order-preview",
+                "prediction-order-submit",
+              ]
+            : ["auth-verify", "portfolio-get", "risk-status", "orders-preview", "orders-submit"],
       });
       return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
     });
@@ -800,6 +1684,22 @@ export class MahoragaMcpAgent extends McpAgent<Env> {
             "options-order-submit",
           ],
         },
+        ...(brokerName === "kalshi"
+          ? [
+              {
+                category: "Prediction Markets",
+                tools: [
+                  "prediction-markets-list",
+                  "prediction-market-get",
+                  "prediction-portfolio-get",
+                  "prediction-risk-status",
+                  "prediction-order-preview",
+                  "prediction-order-submit",
+                  "prediction-position-close",
+                ],
+              },
+            ]
+          : []),
         { category: "Utility", tools: ["help-usage", "catalog-list"] },
       ];
       return { content: [{ type: "text" as const, text: JSON.stringify(success({ catalog }), null, 2) }] };
