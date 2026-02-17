@@ -42,7 +42,7 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
       <Panel
-        title="TRADING CONFIGURATION"
+        title="AGENT CONFIGURATION"
         className="w-full max-w-2xl max-h-[90vh] overflow-auto"
         titleRight={
           <button onClick={onClose} className="hud-label hover:text-hud-primary">

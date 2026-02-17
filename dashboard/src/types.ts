@@ -1,5 +1,6 @@
 export interface Account {
   equity: number
+  last_equity?: number
   cash: number
   buying_power: number
   portfolio_value: number
@@ -11,7 +12,11 @@ export interface Position {
   side: string
   market_value: number
   unrealized_pl: number
+  unrealized_plpc?: number
   current_price: number
+  avg_entry_price?: number
+  prediction_outcome?: 'yes' | 'no'
+  prediction_probability?: number
 }
 
 export interface Clock {
@@ -23,12 +28,14 @@ export interface Clock {
 export interface Signal {
   symbol: string
   source: string
+  source_detail?: string
   sentiment: number
   volume: number
   reason: string
   bullish?: number
   bearish?: number
   score?: number
+  quality_score?: number
   upvotes?: number
   isCrypto?: boolean
   momentum?: number
@@ -192,6 +199,9 @@ export interface PositionHistory {
 }
 
 export interface Status {
+  enabled?: boolean
+  broker?: 'alpaca' | 'kalshi'
+  strategy?: string
   account: Account | null
   positions: Position[]
   clock: Clock | null

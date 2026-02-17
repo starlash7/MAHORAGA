@@ -45,11 +45,12 @@ function formatPercent(value: number): string {
 
 function getAgentColor(agent: string): string {
   const colors: Record<string, string> = {
-    'Analyst': 'text-hud-purple',
-    'Executor': 'text-hud-cyan',
+    'Analyst': 'text-hud-primary',
+    'Executor': 'text-hud-blue',
     'StockTwits': 'text-hud-success',
+    'PredictionGatherer': 'text-hud-primary',
     'SignalResearch': 'text-hud-cyan',
-    'PositionResearch': 'text-hud-purple',
+    'PositionResearch': 'text-hud-blue',
     'Crypto': 'text-hud-warning',
     'System': 'text-hud-text-dim',
   }
@@ -83,6 +84,30 @@ function formatCryptoSymbol(symbol: string, cryptoSymbols: string[] = []): strin
   const match = upperSymbol.match(/^([A-Z]{2,5})(USD|USDT|USDC)$/)
   if (match) return `${match[1]}/${match[2]}`
   return symbol
+}
+
+function getPositionPlPct(position: Position): number {
+  if (typeof position.unrealized_plpc === 'number' && Number.isFinite(position.unrealized_plpc)) {
+    return position.unrealized_plpc * 100
+  }
+  const denominator = position.market_value - position.unrealized_pl
+  if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-9) return 0
+  return (position.unrealized_pl / denominator) * 100
+}
+
+function formatProbability(value: number): string {
+  const pct = Math.max(0, Math.min(1, value)) * 100
+  return `${pct.toFixed(1)}%`
+}
+
+function formatSignalPrice(signal: Signal, isKalshi: boolean): string | null {
+  if (typeof signal.price !== 'number') return null
+  if (isKalshi || signal.source === 'prediction_market') return formatProbability(signal.price)
+  return formatCurrency(signal.price)
+}
+
+function isPredictionSignal(signal: Signal): boolean {
+  return signal.source === 'prediction_market' || signal.source_detail === 'kalshi_probability_edge'
 }
 
 function getVerdictColor(verdict: string): string {
@@ -119,7 +144,7 @@ async function fetchPortfolioHistory(period: string = '1D'): Promise<PortfolioSn
   }
 }
 
-// Generate mock price history for positions
+// Generate mock history for positions
 function generateMockPriceHistory(currentPrice: number, unrealizedPl: number, points: number = 20): number[] {
   const prices: number[] = []
   const isPositive = unrealizedPl >= 0
@@ -222,16 +247,17 @@ export default function App() {
   const logs = status?.logs || []
   const costs = status?.costs || { total_usd: 0, calls: 0, tokens_in: 0, tokens_out: 0 }
   const config = status?.config
+  const broker = status?.broker || 'alpaca'
+  const isKalshi = broker === 'kalshi'
   const isMarketOpen = status?.clock?.is_open ?? false
 
-  const startingEquity = config?.starting_equity || 100000
+  const startingEquity = config?.starting_equity || account?.last_equity || account?.equity || 100000
   const unrealizedPl = positions.reduce((sum, p) => sum + p.unrealized_pl, 0)
   const totalPl = account ? account.equity - startingEquity : 0
   const realizedPl = totalPl - unrealizedPl
   const totalPlPct = account ? (totalPl / startingEquity) * 100 : 0
 
-  // Color palette for position lines (distinct colors for each stock)
-  const positionColors = ['cyan', 'purple', 'yellow', 'blue', 'green'] as const
+  const positionColors = ['primary', 'green', 'blue', 'yellow', 'red'] as const
 
   // Generate mock price histories for positions (stable per session via useMemo)
   const positionPriceHistories = useMemo(() => {
@@ -258,7 +284,7 @@ export default function App() {
   }, [portfolioHistory, portfolioPeriod])
 
   const { marketMarkers, marketHoursZone } = useMemo(() => {
-    if (portfolioPeriod !== '1D' || portfolioHistory.length === 0) {
+    if (isKalshi || portfolioPeriod !== '1D' || portfolioHistory.length === 0) {
       return { marketMarkers: undefined, marketHoursZone: undefined }
     }
     
@@ -288,7 +314,7 @@ export default function App() {
       marketMarkers: markers.length > 0 ? markers : undefined,
       marketHoursZone: zone
     }
-  }, [portfolioHistory, portfolioPeriod])
+  }, [portfolioHistory, portfolioPeriod, isKalshi])
 
   // Normalize position price histories to % change for stacked comparison view
   const normalizedPositionSeries = useMemo(() => {
@@ -296,6 +322,7 @@ export default function App() {
       const priceHistory = positionPriceHistories[pos.symbol] || []
       if (priceHistory.length < 2) return null
       const startPrice = priceHistory[0]
+      if (!startPrice || !Number.isFinite(startPrice)) return null
       // Convert to % change from start
       const normalizedData = priceHistory.map(price => ((price - startPrice) / startPrice) * 100)
       return {
@@ -359,19 +386,20 @@ export default function App() {
           <div className="flex items-center gap-4 md:gap-6">
             <div className="flex items-baseline gap-2">
               <span className="text-xl md:text-2xl font-light tracking-tight text-hud-text-bright">
-                MAHORAGA
+                MAHORAGA PM
               </span>
               <span className="hud-label">v2</span>
             </div>
             <StatusIndicator 
               status={isMarketOpen ? 'active' : 'inactive'} 
-              label={isMarketOpen ? 'MARKET OPEN' : 'MARKET CLOSED'}
+              label={isKalshi ? (isMarketOpen ? 'EXCHANGE LIVE' : 'EXCHANGE PAUSED') : (isMarketOpen ? 'MARKET OPEN' : 'MARKET CLOSED')}
               pulse={isMarketOpen}
             />
           </div>
           <div className="flex items-center gap-3 md:gap-6 flex-wrap">
             <StatusBar
               items={[
+                { label: 'BROKER', value: broker.toUpperCase(), status: isMarketOpen ? 'active' : 'inactive' },
                 { label: 'LLM COST', value: `$${costs.total_usd.toFixed(4)}`, status: costs.total_usd > 1 ? 'warning' : 'active' },
                 { label: 'API CALLS', value: costs.calls.toString() },
               ]}
@@ -400,8 +428,8 @@ export default function App() {
                 <div className="space-y-4">
                   <Metric label="EQUITY" value={formatCurrency(account.equity)} size="xl" />
                   <div className="grid grid-cols-2 gap-4">
-                    <Metric label="CASH" value={formatCurrency(account.cash)} size="md" />
-                    <Metric label="BUYING POWER" value={formatCurrency(account.buying_power)} size="md" />
+                    <Metric label={isKalshi ? 'AVAILABLE CASH' : 'CASH'} value={formatCurrency(account.cash)} size="md" />
+                    <Metric label={isKalshi ? 'CONTRACT BP' : 'BUYING POWER'} value={formatCurrency(account.buying_power)} size="md" />
                   </div>
                   <div className="pt-2 border-t border-hud-line space-y-2">
                     <Metric 
@@ -439,21 +467,23 @@ export default function App() {
                   <table className="w-full">
                     <thead>
                       <tr className="border-b border-hud-line/50">
-                        <th className="hud-label text-left py-2 px-2">Symbol</th>
+                        <th className="hud-label text-left py-2 px-2">{isKalshi ? 'Contract' : 'Symbol'}</th>
                         <th className="hud-label text-right py-2 px-2 hidden sm:table-cell">Qty</th>
-                        <th className="hud-label text-right py-2 px-2 hidden md:table-cell">Value</th>
+                        <th className="hud-label text-right py-2 px-2 hidden md:table-cell">{isKalshi ? 'Mark' : 'Value'}</th>
                         <th className="hud-label text-right py-2 px-2">P&L</th>
                         <th className="hud-label text-center py-2 px-2">Trend</th>
                       </tr>
                     </thead>
                     <tbody>
                       {positions.map((pos: Position) => {
-                        const plPct = (pos.unrealized_pl / (pos.market_value - pos.unrealized_pl)) * 100
+                        const plPct = getPositionPlPct(pos)
                         const priceHistory = positionPriceHistories[pos.symbol] || []
                         const posEntry = status?.positionEntries?.[pos.symbol]
                         const staleness = status?.stalenessAnalysis?.[pos.symbol]
                         const holdTime = posEntry ? Math.floor((Date.now() - posEntry.entry_time) / 3600000) : null
-                        
+                        const markProbability = pos.prediction_probability ?? pos.current_price
+                        const entryProbability = pos.avg_entry_price || posEntry?.entry_price
+
                         return (
                           <motion.tr 
                             key={pos.symbol}
@@ -466,12 +496,18 @@ export default function App() {
                                 position="right"
                                 content={
                                   <TooltipContent
-                                    title={isCryptoSymbol(pos.symbol, config?.crypto_symbols)
-                                      ? `${formatCryptoSymbol(pos.symbol, config?.crypto_symbols)} - CRYPTO`
-                                      : pos.symbol}
+                                    title={isKalshi ? `${pos.symbol} - ${String(pos.prediction_outcome || 'yes').toUpperCase()}` : pos.symbol}
                                     items={[
-                                      { label: 'Entry Price', value: posEntry ? formatCurrency(posEntry.entry_price) : 'N/A' },
-                                      { label: 'Current Price', value: formatCurrency(pos.current_price) },
+                                      {
+                                        label: isKalshi ? 'Entry Probability' : 'Entry Price',
+                                        value: entryProbability !== undefined
+                                          ? (isKalshi ? formatProbability(entryProbability) : formatCurrency(entryProbability))
+                                          : 'N/A'
+                                      },
+                                      {
+                                        label: isKalshi ? 'Current Probability' : 'Current Price',
+                                        value: isKalshi ? formatProbability(markProbability) : formatCurrency(pos.current_price)
+                                      },
                                       { label: 'Hold Time', value: holdTime !== null ? `${holdTime}h` : 'N/A' },
                                       { label: 'Entry Sentiment', value: posEntry ? `${(posEntry.entry_sentiment * 100).toFixed(0)}%` : 'N/A' },
                                       ...(staleness ? [{ 
@@ -485,17 +521,23 @@ export default function App() {
                                 }
                               >
                                 <span className="cursor-help border-b border-dotted border-hud-text-dim">
-                                  {isCryptoSymbol(pos.symbol, config?.crypto_symbols) && (
-                                    <span className="text-hud-warning mr-1">₿</span>
+                                  {isKalshi ? (
+                                    <span className="text-hud-primary mr-1">◎</span>
+                                  ) : (
+                                    isCryptoSymbol(pos.symbol, config?.crypto_symbols) && (
+                                      <span className="text-hud-warning mr-1">₿</span>
+                                    )
                                   )}
-                                  {isCryptoSymbol(pos.symbol, config?.crypto_symbols) 
+                                  {isCryptoSymbol(pos.symbol, config?.crypto_symbols)
                                     ? formatCryptoSymbol(pos.symbol, config?.crypto_symbols)
                                     : pos.symbol}
                                 </span>
                               </Tooltip>
                             </td>
                             <td className="hud-value-sm text-right py-2 px-2 hidden sm:table-cell">{pos.qty}</td>
-                            <td className="hud-value-sm text-right py-2 px-2 hidden md:table-cell">{formatCurrency(pos.market_value)}</td>
+                            <td className="hud-value-sm text-right py-2 px-2 hidden md:table-cell">
+                              {isKalshi ? formatProbability(markProbability) : formatCurrency(pos.market_value)}
+                            </td>
                             <td className={clsx(
                               'hud-value-sm text-right py-2 px-2',
                               pos.unrealized_pl >= 0 ? 'text-hud-success' : 'text-hud-error'
@@ -537,7 +579,7 @@ export default function App() {
           {/* Row 2: Portfolio Performance Chart */}
           <div className="col-span-4 md:col-span-8 lg:col-span-8">
             <Panel 
-              title="PORTFOLIO PERFORMANCE" 
+              title={isKalshi ? "PREDICTION PORTFOLIO" : "PORTFOLIO PERFORMANCE"} 
               titleRight={
                 <div className="flex gap-2">
                   {(['1D', '1W', '1M'] as const).map(p => (
@@ -564,7 +606,10 @@ export default function App() {
                     showArea={true}
                     showGrid={true}
                     showDots={false}
-                    formatValue={(v) => `$${(v / 1000).toFixed(1)}k`}
+                    formatValue={(v) => {
+                      if (Math.abs(v) >= 1000) return `$${(v / 1000).toFixed(1)}k`
+                      return formatCurrency(v)
+                    }}
                     markers={marketMarkers}
                     marketHours={marketHoursZone}
                   />
@@ -578,7 +623,7 @@ export default function App() {
           </div>
 
           <div className="col-span-4 md:col-span-8 lg:col-span-4">
-            <Panel title="POSITION PERFORMANCE" titleRight="% CHANGE" className="h-[320px]">
+            <Panel title={isKalshi ? "CONTRACT PERFORMANCE" : "POSITION PERFORMANCE"} titleRight="% CHANGE" className="h-[320px]">
               {positions.length === 0 ? (
                 <div className="h-full flex items-center justify-center text-hud-text-dim text-sm">
                   No positions to display
@@ -589,7 +634,7 @@ export default function App() {
                   <div className="flex flex-wrap gap-3 mb-2 pb-2 border-b border-hud-line/30 shrink-0">
                     {positions.slice(0, 5).map((pos: Position, idx: number) => {
                       const isPositive = pos.unrealized_pl >= 0
-                      const plPct = (pos.unrealized_pl / (pos.market_value - pos.unrealized_pl)) * 100
+                      const plPct = getPositionPlPct(pos)
                       const color = positionColors[idx % positionColors.length]
                       return (
                         <div key={pos.symbol} className="flex items-center gap-1.5">
@@ -627,7 +672,7 @@ export default function App() {
 
           {/* Row 3: Signals, Activity, Research */}
           <div className="col-span-4 md:col-span-4 lg:col-span-4">
-            <Panel title="ACTIVE SIGNALS" titleRight={signals.length.toString()} className="h-80">
+            <Panel title={isKalshi ? "PREDICTION SIGNALS" : "ACTIVE SIGNALS"} titleRight={signals.length.toString()} className="h-80">
               <div className="overflow-y-auto h-full space-y-1">
                 {signals.length === 0 ? (
                   <div className="text-hud-text-dim text-sm py-4 text-center">Gathering signals...</div>
@@ -645,9 +690,12 @@ export default function App() {
                             ...(sig.bullish !== undefined ? [{ label: 'Bullish', value: sig.bullish, color: 'text-hud-success' }] : []),
                             ...(sig.bearish !== undefined ? [{ label: 'Bearish', value: sig.bearish, color: 'text-hud-error' }] : []),
                             ...(sig.score !== undefined ? [{ label: 'Score', value: sig.score }] : []),
+                            ...(sig.quality_score !== undefined ? [{ label: 'Quality', value: `${sig.quality_score.toFixed(0)}%` }] : []),
                             ...(sig.upvotes !== undefined ? [{ label: 'Upvotes', value: sig.upvotes }] : []),
                             ...(sig.momentum !== undefined ? [{ label: 'Momentum', value: `${sig.momentum >= 0 ? '+' : ''}${sig.momentum.toFixed(2)}%` }] : []),
-                            ...(sig.price !== undefined ? [{ label: 'Price', value: formatCurrency(sig.price) }] : []),
+                            ...(typeof sig.price === 'number'
+                              ? [{ label: isKalshi || isPredictionSignal(sig) ? 'Probability' : 'Price', value: formatSignalPrice(sig, isKalshi) || 'N/A' }]
+                              : []),
                           ]}
                           description={sig.reason}
                         />
@@ -659,16 +707,22 @@ export default function App() {
                         transition={{ delay: i * 0.02 }}
                         className={clsx(
                           "flex items-center justify-between py-1 px-2 border-b border-hud-line/10 hover:bg-hud-line/10 cursor-help",
+                          (isKalshi || isPredictionSignal(sig)) && "bg-hud-primary/8",
                           sig.isCrypto && "bg-hud-warning/5"
                         )}
                       >
                         <div className="flex items-center gap-2">
-                          {sig.isCrypto && <span className="text-hud-warning text-xs">₿</span>}
+                          {(isKalshi || isPredictionSignal(sig)) && <span className="text-hud-primary text-xs">◎</span>}
+                          {sig.isCrypto && !isKalshi && <span className="text-hud-warning text-xs">₿</span>}
                           <span className="hud-value-sm">{sig.symbol}</span>
-                          <span className={clsx('hud-label', sig.isCrypto ? 'text-hud-warning' : '')}>{sig.source.toUpperCase()}</span>
+                          <span className={clsx('hud-label', (isKalshi || isPredictionSignal(sig)) ? 'text-hud-primary' : sig.isCrypto ? 'text-hud-warning' : '')}>
+                            {isPredictionSignal(sig) ? 'PREDICTION' : sig.source.toUpperCase()}
+                          </span>
                         </div>
                         <div className="flex items-center gap-3">
-                          {sig.isCrypto && sig.momentum !== undefined ? (
+                          {(isKalshi || isPredictionSignal(sig)) && typeof sig.price === 'number' ? (
+                            <span className="hud-label hidden sm:inline">{formatProbability(sig.price)}</span>
+                          ) : sig.isCrypto && sig.momentum !== undefined ? (
                             <span className={clsx('hud-label hidden sm:inline', sig.momentum >= 0 ? 'text-hud-success' : 'text-hud-error')}>
                               {sig.momentum >= 0 ? '+' : ''}{sig.momentum.toFixed(1)}%
                             </span>
@@ -815,37 +869,49 @@ export default function App() {
           <div className="flex flex-wrap gap-4 md:gap-6">
             {config && (
               <>
+                <MetricInline label="BROKER" value={broker.toUpperCase()} valueClassName="text-hud-primary" />
+                {status?.strategy && <MetricInline label="STRATEGY" value={status.strategy} />}
                 <MetricInline label="MAX POS" value={`$${config.max_position_value}`} />
                 <MetricInline label="MIN SENT" value={`${(config.min_sentiment_score * 100).toFixed(0)}%`} />
                 <MetricInline label="TAKE PROFIT" value={`${config.take_profit_pct}%`} />
                 <MetricInline label="STOP LOSS" value={`${config.stop_loss_pct}%`} />
-                <span className="hidden lg:inline text-hud-line">|</span>
-                <MetricInline 
-                  label="OPTIONS" 
-                  value={config.options_enabled ? 'ON' : 'OFF'} 
-                  valueClassName={config.options_enabled ? 'text-hud-purple' : 'text-hud-text-dim'}
-                />
-                {config.options_enabled && (
+                {isKalshi ? (
                   <>
-                    <MetricInline label="OPT Δ" value={config.options_target_delta?.toFixed(2) || '0.35'} />
-                    <MetricInline label="OPT DTE" value={`${config.options_min_dte || 7}-${config.options_max_dte || 45}`} />
+                    <span className="hidden lg:inline text-hud-line">|</span>
+                    <MetricInline label="MODE" value={(status?.enabled ? 'LIVE' : 'IDLE')} valueClassName={status?.enabled ? 'text-hud-success' : 'text-hud-text-dim'} />
+                    <MetricInline label="WATCHED" value={signals.length} />
                   </>
-                )}
-                <span className="hidden lg:inline text-hud-line">|</span>
-                <MetricInline 
-                  label="CRYPTO" 
-                  value={config.crypto_enabled ? '24/7' : 'OFF'} 
-                  valueClassName={config.crypto_enabled ? 'text-hud-warning' : 'text-hud-text-dim'}
-                />
-                {config.crypto_enabled && (
-                  <MetricInline label="SYMBOLS" value={(config.crypto_symbols || ['BTC', 'ETH', 'SOL']).map(s => s.split('/')[0]).join('/')} />
+                ) : (
+                  <>
+                    <span className="hidden lg:inline text-hud-line">|</span>
+                    <MetricInline
+                      label="OPTIONS"
+                      value={config.options_enabled ? 'ON' : 'OFF'}
+                      valueClassName={config.options_enabled ? 'text-hud-blue' : 'text-hud-text-dim'}
+                    />
+                    {config.options_enabled && (
+                      <>
+                        <MetricInline label="OPT Δ" value={config.options_target_delta?.toFixed(2) || '0.35'} />
+                        <MetricInline label="OPT DTE" value={`${config.options_min_dte || 7}-${config.options_max_dte || 45}`} />
+                      </>
+                    )}
+                    <span className="hidden lg:inline text-hud-line">|</span>
+                    <MetricInline
+                      label="CRYPTO"
+                      value={config.crypto_enabled ? '24/7' : 'OFF'}
+                      valueClassName={config.crypto_enabled ? 'text-hud-warning' : 'text-hud-text-dim'}
+                    />
+                    {config.crypto_enabled && (
+                      <MetricInline label="SYMBOLS" value={(config.crypto_symbols || ['BTC', 'ETH', 'SOL']).map(s => s.split('/')[0]).join('/')} />
+                    )}
+                  </>
                 )}
               </>
             )}
           </div>
           <div className="flex items-center gap-4">
-            <span className="hud-label hidden md:inline">AUTONOMOUS TRADING SYSTEM</span>
-            <span className="hud-value-sm">PAPER MODE</span>
+            <span className="hud-label hidden md:inline">{isKalshi ? 'PREDICTION ENGINE' : 'AUTONOMOUS TRADING SYSTEM'}</span>
+            <span className="hud-value-sm">{isKalshi ? 'KALSHI MODE' : 'PAPER MODE'}</span>
           </div>
         </footer>
       </div>
