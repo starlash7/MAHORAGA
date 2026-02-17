@@ -8,8 +8,12 @@
 	],
 	"vars": {
 		"ENVIRONMENT": "production",
+		"BROKER_PROVIDER": "kalshi",
+		"KALSHI_MOCK_MODE": "true",
+		"KALSHI_MOCK_STARTING_CASH": "10000",
+		"KALSHI_MARKETS_WATCHLIST": "USREC-2026,FEDCUT-2026Q2,BTC-2026-120K,SNP-2026-6500",
 		"FEATURE_LLM_RESEARCH": "true",
-		"FEATURE_OPTIONS": "true",
+		"FEATURE_OPTIONS": "false",
 		"DEFAULT_MAX_POSITION_PCT": "0.10",
 		"DEFAULT_MAX_NOTIONAL_PER_TRADE": "5000",
 		"DEFAULT_MAX_DAILY_LOSS_PCT": "0.02",
@@ -19,10 +23,16 @@
 	},
 	// Secrets (set via `wrangler secret put <NAME>`):
 	// Required:
-	// - ALPACA_API_KEY
-	// - ALPACA_API_SECRET
 	// - MAHORAGA_API_TOKEN (API authentication - generate with: openssl rand -base64 48)
 	// - KILL_SWITCH_SECRET (emergency kill switch + approval token signing)
+	//
+	// Broker credentials (based on BROKER_PROVIDER):
+	// - alpaca:
+	//   - ALPACA_API_KEY
+	//   - ALPACA_API_SECRET
+	// - kalshi (for future live mode):
+	//   - KALSHI_API_KEY_ID
+	//   - KALSHI_API_PRIVATE_KEY
 	// 
 	// LLM Provider (choose one mode):
 	// - LLM_PROVIDER ("openai-raw" | "ai-sdk" | "vercel-gateway", default: "openai-raw")
@@ -39,6 +49,9 @@
 	//
 	// Optional:
 	// - ALPACA_PAPER ("true" for paper trading)
+	// - KALSHI_BASE_URL (override Kalshi API base URL)
+	// - KALSHI_MOCK_ACCOUNT_ID (set isolated local mock account)
+	// - KALSHI_MARKETS_WATCHLIST (comma-separated tickers for signal gatherer)
 	// - TWITTER_BEARER_TOKEN
 	// - DISCORD_WEBHOOK_URL
 	"d1_databases": [

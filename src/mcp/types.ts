@@ -37,7 +37,7 @@ export interface PolicyResult {
 
 export interface OrderPreview {
   symbol: string;
-  asset_class: "us_equity" | "crypto";
+  asset_class: "us_equity" | "crypto" | "prediction";
   side: "buy" | "sell";
   qty?: number;
   notional?: number;

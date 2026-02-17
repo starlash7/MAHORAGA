@@ -54,7 +54,7 @@ export default {
         JSON.stringify({
           name: "mahoraga",
           version: "0.3.0",
-          description: "Autonomous LLM-powered trading agent on Cloudflare Workers",
+          description: "Autonomous LLM-powered trading agent for prediction markets on Cloudflare Workers",
           endpoints: {
             health: "/health",
             mcp: "/mcp (auth required)",

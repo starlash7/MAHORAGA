@@ -10,7 +10,7 @@
  *   export const activeStrategy: Strategy = myStrategy;
  */
 
-import { defaultStrategy } from "./default";
+import { predictionMarketStrategy } from "./prediction-market";
 import type { Strategy } from "./types";
 
-export const activeStrategy: Strategy = defaultStrategy;
+export const activeStrategy: Strategy = predictionMarketStrategy;

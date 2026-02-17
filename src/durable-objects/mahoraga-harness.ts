@@ -21,7 +21,7 @@ import type {
 } from "../core/types";
 import type { Env } from "../env.d";
 import { getDefaultPolicyConfig } from "../policy/config";
-import { createAlpacaProviders } from "../providers/alpaca";
+import { createBrokerProviders, getBrokerProviderName } from "../providers/broker";
 import { createLLMProvider } from "../providers/llm/factory";
 import type { Account, LLMProvider, MarketClock, Position } from "../providers/types";
 import type { AgentConfig } from "../schemas/agent-config";
@@ -45,7 +45,10 @@ import type { StrategyContext } from "../strategy/types";
 // ============================================================================
 
 export class MahoragaHarness extends DurableObject<Env> {
-  private state: AgentState = { ...DEFAULT_STATE };
+  private state: AgentState = {
+    ...DEFAULT_STATE,
+    config: { ...DEFAULT_STATE.config, ...activeStrategy.defaultConfig },
+  };
   private _llm: LLMProvider | null = null;
   private _etDayFormatter: Intl.DateTimeFormat | null = null;
   private discordCooldowns: Map<string, number> = new Map();
@@ -65,7 +68,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       const stored = await this.ctx.storage.get<AgentState>("state");
       if (stored) {
         this.state = { ...DEFAULT_STATE, ...stored };
-        this.state.config = { ...DEFAULT_STATE.config, ...this.state.config };
+        this.state.config = { ...DEFAULT_STATE.config, ...activeStrategy.defaultConfig, ...this.state.config };
       }
       this.initializeLLM();
 
@@ -138,11 +141,12 @@ export class MahoragaHarness extends DurableObject<Env> {
   private buildStrategyContext(): StrategyContext {
     const self = this;
     const db = createD1Client(this.env.DB);
-    const alpaca = createAlpacaProviders(this.env);
+    const providers = createBrokerProviders(this.env);
     const policyConfig = getDefaultPolicyConfig(this.env);
 
     const broker = createPolicyBroker({
-      alpaca,
+      providerName: providers.name,
+      trading: providers.trading,
       policyConfig,
       db,
       log: (agent, action, details) => self.log(agent, action, details),
@@ -249,8 +253,10 @@ export class MahoragaHarness extends DurableObject<Env> {
       // Positions snapshot
       const positions = await ctx.broker.getPositions();
 
+      const brokerName = getBrokerProviderName(this.env);
+
       // Crypto trading (24/7)
-      if (this.state.config.crypto_enabled) {
+      if (this.state.config.crypto_enabled && brokerName === "alpaca") {
         await runCryptoTrading(ctx, positions);
       }
 
@@ -288,7 +294,7 @@ export class MahoragaHarness extends DurableObject<Env> {
         }
 
         // Options exits (checked every tick, not just analyst cycle)
-        if (this.state.config.options_enabled) {
+        if (this.state.config.options_enabled && brokerName === "alpaca") {
           for (const pos of positions) {
             if (pos.asset_class !== "us_option") continue;
             const ep = pos.avg_entry_price || pos.current_price;
@@ -337,7 +343,9 @@ export class MahoragaHarness extends DurableObject<Env> {
   private async runDataGatherers(ctx: StrategyContext): Promise<void> {
     this.log("System", "gathering_data", {});
 
-    await tickerCache.refreshSecTickersIfNeeded();
+    if (getBrokerProviderName(this.env) === "alpaca") {
+      await tickerCache.refreshSecTickersIfNeeded();
+    }
 
     const results = await Promise.allSettled(activeStrategy.gatherers.map((g) => g.gather(ctx)));
 
@@ -535,15 +543,24 @@ export class MahoragaHarness extends DurableObject<Env> {
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) return cached;
 
     try {
-      const alpaca = createAlpacaProviders(this.env);
-      const crypto = isCryptoSymbol(symbol, this.state.config.crypto_symbols || []);
+      const providers = createBrokerProviders(this.env);
+      const crypto = providers.name === "alpaca" && isCryptoSymbol(symbol, this.state.config.crypto_symbols || []);
       let price = 0;
-      if (crypto) {
-        const snapshot = await alpaca.marketData.getCryptoSnapshot(normalizeCryptoSymbol(symbol)).catch(() => null);
-        price = snapshot?.latest_trade?.price || snapshot?.latest_quote?.ask_price || 0;
+      if (providers.marketData) {
+        if (crypto) {
+          const snapshot = await providers.marketData
+            .getCryptoSnapshot(normalizeCryptoSymbol(symbol))
+            .catch(() => null);
+          price = snapshot?.latest_trade?.price || snapshot?.latest_quote?.ask_price || 0;
+        } else {
+          const snapshot = await providers.marketData.getSnapshot(symbol).catch(() => null);
+          price = snapshot?.latest_trade?.price || snapshot?.latest_quote?.ask_price || 0;
+        }
       } else {
-        const snapshot = await alpaca.marketData.getSnapshot(symbol).catch(() => null);
-        price = snapshot?.latest_trade?.price || snapshot?.latest_quote?.ask_price || 0;
+        const existingPosition = await ctx.broker
+          .getPositions()
+          .then((positions) => positions.find((p) => p.symbol === symbol));
+        price = existingPosition?.current_price || 0;
       }
 
       const prompt = activeStrategy.prompts.researchSignal(symbol, sentiment, sources, price, ctx);
@@ -785,9 +802,16 @@ export class MahoragaHarness extends DurableObject<Env> {
 
       // Options routing
       if (entry.useOptions) {
-        const contract = await findBestOptionsContract(ctx, entry.symbol, "bullish", account.equity);
-        if (contract) {
-          await this.executeOptionsOrder(contract, 1, account.equity);
+        if (getBrokerProviderName(this.env) !== "alpaca") {
+          this.log("Options", "skipped_non_alpaca_broker", {
+            symbol: entry.symbol,
+            broker: getBrokerProviderName(this.env),
+          });
+        } else {
+          const contract = await findBestOptionsContract(ctx, entry.symbol, "bullish", account.equity);
+          if (contract) {
+            await this.executeOptionsOrder(contract, 1, account.equity);
+          }
         }
       }
 
@@ -888,6 +912,8 @@ export class MahoragaHarness extends DurableObject<Env> {
     equity: number
   ): Promise<boolean> {
     if (!this.state.config.options_enabled) return false;
+    const providers = createBrokerProviders(this.env);
+    if (!providers.options || providers.name !== "alpaca") return false;
 
     const totalCost = contract.mid_price * quantity * 100;
     const maxAllowed = equity * this.state.config.options_max_pct_per_trade;
@@ -902,8 +928,7 @@ export class MahoragaHarness extends DurableObject<Env> {
     }
 
     try {
-      const alpaca = createAlpacaProviders(this.env);
-      const order = await alpaca.trading.createOrder({
+      const order = await providers.trading.createOrder({
         symbol: contract.symbol,
         qty,
         side: "buy",
@@ -1137,7 +1162,7 @@ export class MahoragaHarness extends DurableObject<Env> {
   }
 
   private async handleStatus(): Promise<Response> {
-    const alpaca = createAlpacaProviders(this.env);
+    const providers = createBrokerProviders(this.env);
 
     let account: Account | null = null;
     let positions: Position[] = [];
@@ -1145,9 +1170,9 @@ export class MahoragaHarness extends DurableObject<Env> {
 
     try {
       [account, positions, clock] = await Promise.all([
-        alpaca.trading.getAccount(),
-        alpaca.trading.getPositions(),
-        alpaca.trading.getClock(),
+        providers.trading.getAccount(),
+        providers.trading.getPositions(),
+        providers.trading.getClock(),
       ]);
 
       for (const pos of positions || []) {
@@ -1166,6 +1191,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       data: {
         enabled: this.state.enabled,
         strategy: activeStrategy.name,
+        broker: providers.name,
         account,
         positions,
         clock,
@@ -1227,7 +1253,7 @@ export class MahoragaHarness extends DurableObject<Env> {
   }
 
   private async handleGetHistory(url: URL): Promise<Response> {
-    const alpaca = createAlpacaProviders(this.env);
+    const providers = createBrokerProviders(this.env);
     const period = url.searchParams.get("period") || "1M";
     const timeframe = url.searchParams.get("timeframe") || "1D";
     const intradayReporting = url.searchParams.get("intraday_reporting") as
@@ -1237,7 +1263,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       | null;
 
     try {
-      const history = await alpaca.trading.getPortfolioHistory({
+      const history = await providers.trading.getPortfolioHistory({
         period,
         timeframe,
         intraday_reporting: intradayReporting || "extended_hours",

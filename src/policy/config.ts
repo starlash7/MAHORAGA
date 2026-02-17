@@ -65,6 +65,7 @@ export function getDefaultOptionsPolicyConfig(): OptionsPolicyConfig {
 }
 
 export function getDefaultPolicyConfig(env: Env): PolicyConfig {
+  const isKalshi = env.BROKER_PROVIDER === "kalshi";
   return {
     max_position_pct_equity: parseNumber(env.DEFAULT_MAX_POSITION_PCT, 0.1),
     max_open_positions: parseNumber(env.DEFAULT_MAX_OPEN_POSITIONS, 10),
@@ -76,8 +77,8 @@ export function getDefaultPolicyConfig(env: Env): PolicyConfig {
     deny_symbols: [],
     min_avg_volume: 100000,
     min_price: 1.0,
-    trading_hours_only: true,
-    extended_hours_allowed: false,
+    trading_hours_only: !isKalshi,
+    extended_hours_allowed: isKalshi,
     approval_token_ttl_seconds: parseNumber(env.DEFAULT_APPROVAL_TTL_SECONDS, 300),
     allow_short_selling: false,
     use_cash_only: true,

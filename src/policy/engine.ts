@@ -118,8 +118,8 @@ export class PolicyEngine {
   private checkTradingHours(ctx: PolicyContext, violations: PolicyViolation[], warnings: PolicyWarning[]): void {
     if (!this.config.trading_hours_only) return;
 
-    // Crypto trades 24/7 — skip market hours check
-    if (ctx.order.asset_class === "crypto") return;
+    // 24/7 assets (crypto + prediction contracts) skip market-hours checks
+    if (ctx.order.asset_class === "crypto" || ctx.order.asset_class === "prediction") return;
 
     if (!ctx.clock.is_open) {
       if (!this.config.extended_hours_allowed) {

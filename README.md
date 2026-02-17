@@ -2,11 +2,11 @@
 
 # MAHORAGA
 
-An autonomous, LLM-powered trading agent that runs 24/7 on Cloudflare Workers.
+An autonomous, LLM-powered prediction market agent that runs 24/7 on Cloudflare Workers.
 
 [![Discord](https://img.shields.io/discord/1467592472158015553?color=7289da&label=Discord&logo=discord&logoColor=white)](https://discord.gg/vMFnHe2YBh)
 
-MAHORAGA monitors social sentiment from StockTwits and Reddit, uses AI (OpenAI, Anthropic, Google, xAI, DeepSeek via AI SDK) to analyze signals, and executes trades through Alpaca. It runs as a Cloudflare Durable Object with persistent state, automatic restarts, and 24/7 crypto trading support.
+MAHORAGA supports broker abstraction (`kalshi` / `alpaca`) and now ships with a Kalshi mock mode for prediction market development. It runs as a Cloudflare Durable Object with persistent state and automatic restarts.
 
 <img width="1278" height="957" alt="dashboard" src="https://github.com/user-attachments/assets/56473ab6-e2c6-45fc-9e32-cf85e69f1a2d" />
 
@@ -15,8 +15,8 @@ MAHORAGA monitors social sentiment from StockTwits and Reddit, uses AI (OpenAI, 
 - **24/7 Operation** — Runs on Cloudflare Workers, no local machine required
 - **Multi-Source Signals** — StockTwits, Reddit (4 subreddits), Twitter confirmation
 - **Multi-Provider LLM** — OpenAI, Anthropic, Google, xAI, DeepSeek via AI SDK or Cloudflare AI Gateway
-- **Crypto Trading** — Trade BTC, ETH, SOL around the clock
-- **Options Support** — High-conviction options plays
+- **Prediction Market Mode** — Kalshi-compatible routing with local mock trading
+- **Broker Abstraction** — Switch between Kalshi and Alpaca providers
 - **Staleness Detection** — Auto-exit positions that lose momentum
 - **Pre-Market Analysis** — Prepare trading plans before market open
 - **Discord Notifications** — Get alerts on BUY signals
@@ -26,7 +26,7 @@ MAHORAGA monitors social sentiment from StockTwits and Reddit, uses AI (OpenAI, 
 
 - Node.js 18+
 - Cloudflare account (free tier works)
-- Alpaca account (free, paper trading supported)
+- Kalshi mock mode (default) or Alpaca account for legacy strategy
 - LLM API key (OpenAI, Anthropic, Google, xAI, DeepSeek) or Cloudflare AI Gateway credentials
 
 ## Quick Start
@@ -58,12 +58,18 @@ npx wrangler d1 migrations apply mahoraga-db
 
 ```bash
 # Required
-npx wrangler secret put ALPACA_API_KEY
-npx wrangler secret put ALPACA_API_SECRET
-
 # API Authentication - generate a secure random token (64+ chars recommended)
 # Example: openssl rand -base64 48
 npx wrangler secret put MAHORAGA_API_TOKEN
+npx wrangler secret put KILL_SWITCH_SECRET   # Emergency kill switch (separate from API token)
+
+# Broker credentials (depends on BROKER_PROVIDER in wrangler.jsonc)
+# alpaca mode:
+# npx wrangler secret put ALPACA_API_KEY
+# npx wrangler secret put ALPACA_API_SECRET
+# kalshi live mode (optional, mock mode is default):
+# npx wrangler secret put KALSHI_API_KEY_ID
+# npx wrangler secret put KALSHI_API_PRIVATE_KEY
 
 # LLM Provider (choose one mode)
 npx wrangler secret put LLM_PROVIDER  # "openai-raw" (default), "ai-sdk", or "cloudflare-gateway"
@@ -84,8 +90,14 @@ npx wrangler secret put OPENAI_BASE_URL        # Optional: override OpenAI base 
 npx wrangler secret put ALPACA_PAPER         # "true" for paper trading (recommended)
 npx wrangler secret put TWITTER_BEARER_TOKEN
 npx wrangler secret put DISCORD_WEBHOOK_URL
-npx wrangler secret put KILL_SWITCH_SECRET   # Emergency kill switch (separate from API token)
 ```
+
+Kalshi live mode:
+- Set `BROKER_PROVIDER="kalshi"` in `wrangler.jsonc`
+- Set `KALSHI_MOCK_MODE="false"` in `wrangler.jsonc`
+- Set `KALSHI_MARKETS_WATCHLIST="TICKER1,TICKER2,..."` in `wrangler.jsonc` for signal universe
+- Provide `KALSHI_API_KEY_ID` + `KALSHI_API_PRIVATE_KEY` secrets
+- Optional: set `KALSHI_BASE_URL` (defaults to `https://demo-api.kalshi.co`)
 
 ### 4. Deploy
 

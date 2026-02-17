@@ -41,6 +41,9 @@ export interface Position {
   current_price: number;
   lastday_price: number;
   change_today: number;
+  // Prediction market enrichment (Kalshi migration path)
+  prediction_outcome?: "yes" | "no";
+  prediction_probability?: number;
 }
 
 export interface Order {
@@ -147,7 +150,7 @@ export interface PortfolioHistory {
 
 export interface Asset {
   id: string;
-  class: "us_equity" | "crypto";
+  class: "us_equity" | "crypto" | "us_option" | "prediction_contract";
   exchange: string;
   symbol: string;
   name: string;

@@ -1,5 +1,5 @@
 import type { Env } from "../env.d";
-import { createAlpacaProviders } from "../providers/alpaca";
+import { createBrokerProviders } from "../providers/broker";
 import { createSECEdgarProvider } from "../providers/news/sec-edgar";
 import { createD1Client } from "../storage/d1/client";
 import { cleanupExpiredApprovals } from "../storage/d1/queries/approvals";
@@ -37,10 +37,14 @@ async function runEventIngestion(env: Env): Promise<void> {
   console.log("Starting event ingestion...");
 
   const db = createD1Client(env.DB);
-  const alpaca = createAlpacaProviders(env);
+  const providers = createBrokerProviders(env);
+  if (providers.name !== "alpaca") {
+    console.log(`Skipping event ingestion for broker=${providers.name}`);
+    return;
+  }
 
   try {
-    const clock = await alpaca.trading.getClock();
+    const clock = await providers.trading.getClock();
 
     if (!clock.is_open) {
       console.log("Market closed, skipping event ingestion");
@@ -97,11 +101,11 @@ async function runMarketCloseCleanup(env: Env): Promise<void> {
   console.log("Running market close cleanup...");
 
   const db = createD1Client(env.DB);
-  const alpaca = createAlpacaProviders(env);
+  const providers = createBrokerProviders(env);
 
   try {
-    const positions = await alpaca.trading.getPositions();
-    const account = await alpaca.trading.getAccount();
+    const positions = await providers.trading.getPositions();
+    const account = await providers.trading.getAccount();
 
     console.log(`End of day: ${positions.length} positions, equity=${account.equity}`);
 
