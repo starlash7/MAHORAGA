@@ -4,14 +4,16 @@ import { Panel } from './Panel'
 
 interface SettingsModalProps {
   config: Config
+  broker?: 'alpaca' | 'kalshi'
   onSave: (config: Config) => void
   onClose: () => void
 }
 
-export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
+export function SettingsModal({ config, broker = 'kalshi', onSave, onClose }: SettingsModalProps) {
   const [localConfig, setLocalConfig] = useState<Config>(config)
   const [saving, setSaving] = useState(false)
   const [apiToken, setApiToken] = useState(localStorage.getItem('mahoraga_api_token') || '')
+  const isKalshi = broker === 'kalshi'
 
   // Note: We intentionally do NOT sync localConfig with the config prop after initial mount.
   // This prevents the parent's polling (every 5s) from overwriting user's unsaved changes.
@@ -42,7 +44,7 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
       <Panel
-        title="AGENT CONFIGURATION"
+        title={isKalshi ? "PREDICTION ENGINE CONFIGURATION" : "AGENT CONFIGURATION"}
         className="w-full max-w-2xl max-h-[90vh] overflow-auto"
         titleRight={
           <button onClick={onClose} className="hud-label hover:text-hud-primary">
@@ -51,6 +53,14 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
         }
       >
         <div onClick={e => e.stopPropagation()} className="space-y-6">
+          {isKalshi && (
+            <div className="p-3 border border-hud-primary/30 bg-hud-primary/8 rounded">
+              <p className="text-xs text-hud-text">
+                Kalshi broker is active. Equity options and crypto controls are hidden for this mode.
+              </p>
+            </div>
+          )}
+
           {/* API Authentication */}
           <div className="pb-4 border-b border-hud-line">
             <h3 className="hud-label mb-3 text-hud-error">API Authentication (Required)</h3>
@@ -73,10 +83,10 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
 
           {/* Position Limits */}
           <div>
-            <h3 className="hud-label mb-3 text-hud-primary">Position Limits</h3>
+            <h3 className="hud-label mb-3 text-hud-primary">{isKalshi ? 'Contract Risk Limits' : 'Position Limits'}</h3>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="hud-label block mb-1">Max Position Value ($)</label>
+                <label className="hud-label block mb-1">{isKalshi ? 'Max Notional Per Entry ($)' : 'Max Position Value ($)'}</label>
                 <input
                   type="number"
                   className="hud-input w-full"
@@ -107,10 +117,14 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
 
           {/* Sentiment Thresholds */}
           <div>
-            <h3 className="hud-label mb-3 text-hud-primary">Sentiment Thresholds</h3>
+            <h3 className="hud-label mb-3 text-hud-primary">
+              {isKalshi ? 'Probability Edge Thresholds' : 'Sentiment Thresholds'}
+            </h3>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="hud-label block mb-1">Min Sentiment to Buy (0-1)</label>
+                <label className="hud-label block mb-1">
+                  {isKalshi ? 'Min Edge Signal to Enter (0-1)' : 'Min Sentiment to Buy (0-1)'}
+                </label>
                 <input
                   type="number"
                   step="0.05"
@@ -120,7 +134,9 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
                 />
               </div>
               <div>
-                <label className="hud-label block mb-1">Min Analyst Confidence (0-1)</label>
+                <label className="hud-label block mb-1">
+                  {isKalshi ? 'Min Confidence to Execute (0-1)' : 'Min Analyst Confidence (0-1)'}
+                </label>
                 <input
                   type="number"
                   step="0.05"
@@ -159,7 +175,7 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
 
           {/* Timing */}
           <div>
-            <h3 className="hud-label mb-3 text-hud-primary">Polling Intervals</h3>
+            <h3 className="hud-label mb-3 text-hud-primary">{isKalshi ? 'Cycle Timing' : 'Polling Intervals'}</h3>
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="hud-label block mb-1">Data Poll (ms)</label>
@@ -182,7 +198,9 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
                 />
               </div>
               <div>
-                <label className="hud-label block mb-1">Pre-Market Plan Window (min)</label>
+                <label className="hud-label block mb-1">
+                  {isKalshi ? 'Pre-Open Plan Window (min)' : 'Pre-Market Plan Window (min)'}
+                </label>
                 <input
                   type="number"
                   step="1"
@@ -191,10 +209,16 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
                   value={localConfig.premarket_plan_window_minutes ?? 5}
                   onChange={e => handleChange('premarket_plan_window_minutes', Number(e.target.value))}
                 />
-                <p className="text-[9px] text-hud-text-dim mt-1">Generate a plan when within N minutes of the next market open.</p>
+                <p className="text-[9px] text-hud-text-dim mt-1">
+                  {isKalshi
+                    ? 'Used for venues that have open transitions. Keep small (1-2) for Kalshi mode.'
+                    : 'Generate a plan when within N minutes of the next market open.'}
+                </p>
               </div>
               <div>
-                <label className="hud-label block mb-1">Market Open Execute Window (min)</label>
+                <label className="hud-label block mb-1">
+                  {isKalshi ? 'Open Trigger Execute Window (min)' : 'Market Open Execute Window (min)'}
+                </label>
                 <input
                   type="number"
                   step="1"
@@ -203,7 +227,9 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
                   value={localConfig.market_open_execute_window_minutes ?? 2}
                   onChange={e => handleChange('market_open_execute_window_minutes', Number(e.target.value))}
                 />
-                <p className="text-[9px] text-hud-text-dim mt-1">Execute the plan if the market is open and within this window.</p>
+                <p className="text-[9px] text-hud-text-dim mt-1">
+                  Execute plan actions only within this opening window.
+                </p>
               </div>
             </div>
           </div>
@@ -369,7 +395,9 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
             <h3 className="hud-label mb-3 text-hud-primary">Account</h3>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="hud-label block mb-1">Starting Equity ($)</label>
+                <label className="hud-label block mb-1">
+                  {isKalshi ? 'Starting Portfolio Value ($)' : 'Starting Equity ($)'}
+                </label>
                 <input
                   type="number"
                   className="hud-input w-full"
@@ -382,6 +410,7 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
           </div>
 
           {/* Options Trading */}
+          {!isKalshi && (
           <div>
             <h3 className="hud-label mb-3 text-hud-purple">Options Trading (Beta)</h3>
             <div className="grid grid-cols-2 gap-4">
@@ -471,8 +500,10 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
               </div>
             </div>
           </div>
+          )}
 
           {/* Crypto Trading */}
+          {!isKalshi && (
           <div>
             <h3 className="hud-label mb-3 text-hud-cyan">Crypto Trading (24/7)</h3>
             <div className="grid grid-cols-2 gap-4">
@@ -542,6 +573,7 @@ export function SettingsModal({ config, onSave, onClose }: SettingsModalProps) {
               </div>
             </div>
           </div>
+          )}
 
           {/* Stale Position Management */}
           <div>

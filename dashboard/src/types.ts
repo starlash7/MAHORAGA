@@ -152,7 +152,7 @@ export interface TwitterConfirmation {
 
 export interface PremarketPlan {
   timestamp: number
-  summary: string
+  market_summary: string
   recommendations: Array<{
     symbol: string
     action: 'BUY' | 'SELL' | 'HOLD' | 'SKIP'
@@ -162,8 +162,8 @@ export interface PremarketPlan {
     target_price?: number
     stop_loss?: number
   }>
-  highConvictionPlays: string[]
-  marketOutlook: string
+  high_conviction: string[]
+  researched_buys?: SignalResearch[]
 }
 
 export interface StalenessAnalysis {

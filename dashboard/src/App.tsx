@@ -247,9 +247,35 @@ export default function App() {
   const logs = status?.logs || []
   const costs = status?.costs || { total_usd: 0, calls: 0, tokens_in: 0, tokens_out: 0 }
   const config = status?.config
-  const broker = status?.broker || 'alpaca'
+  const broker = status?.broker || 'kalshi'
   const isKalshi = broker === 'kalshi'
   const isMarketOpen = status?.clock?.is_open ?? false
+  const predictionSignals = useMemo(() => signals.filter((signal) => isPredictionSignal(signal)), [signals])
+  const avgPredictionProbability = useMemo(() => {
+    const priced = predictionSignals
+      .map((signal) => signal.price)
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    if (priced.length === 0) return null
+    return priced.reduce((sum, value) => sum + value, 0) / priced.length
+  }, [predictionSignals])
+  const yesPositions = useMemo(
+    () => positions.filter((position) => (position.prediction_outcome || 'yes') === 'yes').length,
+    [positions]
+  )
+  const noPositions = useMemo(
+    () => positions.filter((position) => position.prediction_outcome === 'no').length,
+    [positions]
+  )
+  const visibleSignals = useMemo(() => {
+    if (!isKalshi) return signals.slice(0, 20)
+    return [...signals]
+      .sort((a, b) => {
+        const predictionFirst = Number(isPredictionSignal(b)) - Number(isPredictionSignal(a))
+        if (predictionFirst !== 0) return predictionFirst
+        return Math.abs(b.sentiment) - Math.abs(a.sentiment)
+      })
+      .slice(0, 20)
+  }, [signals, isKalshi])
 
   const startingEquity = config?.starting_equity || account?.last_equity || account?.equity || 100000
   const unrealizedPl = positions.reduce((sum, p) => sum + p.unrealized_pl, 0)
@@ -266,7 +292,7 @@ export default function App() {
       histories[pos.symbol] = generateMockPriceHistory(pos.current_price, pos.unrealized_pl)
     })
     return histories
-  }, [positions.map(p => p.symbol).join(',')])
+  }, [positions.map(p => `${p.symbol}:${p.current_price}:${p.unrealized_pl}`).join('|')])
 
   // Chart data derived from portfolio history
   const portfolioChartData = useMemo(() => {
@@ -428,8 +454,8 @@ export default function App() {
                 <div className="space-y-4">
                   <Metric label="EQUITY" value={formatCurrency(account.equity)} size="xl" />
                   <div className="grid grid-cols-2 gap-4">
-                    <Metric label={isKalshi ? 'AVAILABLE CASH' : 'CASH'} value={formatCurrency(account.cash)} size="md" />
-                    <Metric label={isKalshi ? 'CONTRACT BP' : 'BUYING POWER'} value={formatCurrency(account.buying_power)} size="md" />
+                    <Metric label={isKalshi ? 'CASH COLLATERAL' : 'CASH'} value={formatCurrency(account.cash)} size="md" />
+                    <Metric label={isKalshi ? 'AVAILABLE TO DEPLOY' : 'BUYING POWER'} value={formatCurrency(account.buying_power)} size="md" />
                   </div>
                   <div className="pt-2 border-t border-hud-line space-y-2">
                     <Metric 
@@ -450,6 +476,21 @@ export default function App() {
                         color={unrealizedPl >= 0 ? 'success' : 'error'}
                       />
                     </div>
+                    {isKalshi && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <MetricInline label="YES CONTRACTS" value={yesPositions} />
+                        <MetricInline label="NO CONTRACTS" value={noPositions} />
+                        <MetricInline
+                          label="PRED SIGNALS"
+                          value={predictionSignals.length}
+                          valueClassName="text-hud-primary"
+                        />
+                        <MetricInline
+                          label="AVG PROB"
+                          value={avgPredictionProbability !== null ? formatProbability(avgPredictionProbability) : 'N/A'}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -528,9 +569,11 @@ export default function App() {
                                       <span className="text-hud-warning mr-1">₿</span>
                                     )
                                   )}
-                                  {isCryptoSymbol(pos.symbol, config?.crypto_symbols)
-                                    ? formatCryptoSymbol(pos.symbol, config?.crypto_symbols)
-                                    : pos.symbol}
+                                  {isKalshi
+                                    ? pos.symbol
+                                    : isCryptoSymbol(pos.symbol, config?.crypto_symbols)
+                                      ? formatCryptoSymbol(pos.symbol, config?.crypto_symbols)
+                                      : pos.symbol}
                                 </span>
                               </Tooltip>
                             </td>
@@ -672,12 +715,18 @@ export default function App() {
 
           {/* Row 3: Signals, Activity, Research */}
           <div className="col-span-4 md:col-span-4 lg:col-span-4">
-            <Panel title={isKalshi ? "PREDICTION SIGNALS" : "ACTIVE SIGNALS"} titleRight={signals.length.toString()} className="h-80">
+            <Panel
+              title={isKalshi ? "PREDICTION SIGNALS" : "ACTIVE SIGNALS"}
+              titleRight={isKalshi ? `${predictionSignals.length}/${signals.length}` : signals.length.toString()}
+              className="h-80"
+            >
               <div className="overflow-y-auto h-full space-y-1">
                 {signals.length === 0 ? (
-                  <div className="text-hud-text-dim text-sm py-4 text-center">Gathering signals...</div>
+                  <div className="text-hud-text-dim text-sm py-4 text-center">
+                    {isKalshi ? 'Gathering prediction signals...' : 'Gathering signals...'}
+                  </div>
                 ) : (
-                  signals.slice(0, 20).map((sig: Signal, i: number) => (
+                  visibleSignals.map((sig: Signal, i: number) => (
                     <Tooltip
                       key={`${sig.symbol}-${sig.source}-${i}`}
                       position="right"
@@ -871,15 +920,24 @@ export default function App() {
               <>
                 <MetricInline label="BROKER" value={broker.toUpperCase()} valueClassName="text-hud-primary" />
                 {status?.strategy && <MetricInline label="STRATEGY" value={status.strategy} />}
-                <MetricInline label="MAX POS" value={`$${config.max_position_value}`} />
+                <MetricInline label={isKalshi ? "MAX NOTIONAL" : "MAX POS"} value={`$${config.max_position_value}`} />
                 <MetricInline label="MIN SENT" value={`${(config.min_sentiment_score * 100).toFixed(0)}%`} />
                 <MetricInline label="TAKE PROFIT" value={`${config.take_profit_pct}%`} />
                 <MetricInline label="STOP LOSS" value={`${config.stop_loss_pct}%`} />
                 {isKalshi ? (
                   <>
                     <span className="hidden lg:inline text-hud-line">|</span>
-                    <MetricInline label="MODE" value={(status?.enabled ? 'LIVE' : 'IDLE')} valueClassName={status?.enabled ? 'text-hud-success' : 'text-hud-text-dim'} />
-                    <MetricInline label="WATCHED" value={signals.length} />
+                    <MetricInline
+                      label="MODE"
+                      value={(status?.enabled ? 'LIVE' : 'IDLE')}
+                      valueClassName={status?.enabled ? 'text-hud-success' : 'text-hud-text-dim'}
+                    />
+                    <MetricInline label="PRED SIG" value={predictionSignals.length} />
+                    <MetricInline
+                      label="AVG PROB"
+                      value={avgPredictionProbability !== null ? formatProbability(avgPredictionProbability) : 'N/A'}
+                    />
+                    <MetricInline label="OPEN YES/NO" value={`${yesPositions}/${noPositions}`} />
                   </>
                 ) : (
                   <>
@@ -925,6 +983,7 @@ export default function App() {
           >
             <SettingsModal 
               config={config} 
+              broker={broker}
               onSave={handleSaveConfig} 
               onClose={() => setShowSettings(false)} 
             />

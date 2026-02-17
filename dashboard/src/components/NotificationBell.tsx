@@ -20,7 +20,7 @@ export function NotificationBell({ overnightActivity, premarketPlan }: Notificat
   )
   
   const unreadCount = hasActivity && !hasRead
-    ? (overnightActivity?.buySignals || 0) + (premarketPlan?.highConvictionPlays?.length || 0)
+    ? (overnightActivity?.buySignals || 0) + (premarketPlan?.high_conviction?.length || 0)
     : 0
 
   useEffect(() => {
@@ -137,11 +137,11 @@ export function NotificationBell({ overnightActivity, premarketPlan }: Notificat
                       </span>
                     </div>
 
-                    {premarketPlan && premarketPlan.highConvictionPlays?.length > 0 && (
+                    {premarketPlan && premarketPlan.high_conviction?.length > 0 && (
                       <div className="space-y-1">
                         <span className="text-[9px] text-hud-text-dim">HIGH CONVICTION:</span>
                         <div className="flex flex-wrap gap-1">
-                          {premarketPlan.highConvictionPlays.map((symbol) => (
+                          {premarketPlan.high_conviction.map((symbol) => (
                             <span 
                               key={symbol}
                               className="text-xs px-1.5 py-0.5 bg-hud-success/10 text-hud-success border border-hud-success/30 rounded"
@@ -153,10 +153,10 @@ export function NotificationBell({ overnightActivity, premarketPlan }: Notificat
                       </div>
                     )}
 
-                    {premarketPlan?.marketOutlook && (
+                    {premarketPlan?.market_summary && (
                       <p className="text-[10px] text-hud-text-dim mt-2 leading-tight">
-                        {premarketPlan.marketOutlook.slice(0, 100)}
-                        {premarketPlan.marketOutlook.length > 100 && '...'}
+                        {premarketPlan.market_summary.slice(0, 100)}
+                        {premarketPlan.market_summary.length > 100 && '...'}
                       </p>
                     )}
                   </div>

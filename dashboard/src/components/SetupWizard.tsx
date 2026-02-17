@@ -19,7 +19,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
   const handleSubmit = async () => {
     if (!alpacaKey || !alpacaSecret) {
-      setError('Alpaca API Key and Secret are required')
+      setError('Kalshi API Key ID and Private Key are required')
       return
     }
 
@@ -120,26 +120,26 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
             <div className="text-center py-4">
               <h2 className="text-2xl font-light text-hud-text-bright mb-2">Welcome to Mahoraga</h2>
               <p className="text-hud-text-dim text-sm">
-                Autonomous trading powered by social sentiment and AI analysis
+                Prediction-market automation powered by probability signals and AI analysis
               </p>
             </div>
 
             <div className="space-y-4 text-sm text-hud-text">
               <div className="flex items-start gap-3">
                 <span className="text-hud-success">1.</span>
-                <span>Monitors StockTwits for sentiment signals</span>
+                <span>Monitors configured Kalshi markets for edge and momentum shifts</span>
               </div>
               <div className="flex items-start gap-3">
                 <span className="text-hud-success">2.</span>
-                <span>AI research agents analyze candidates 24/7</span>
+                <span>Research agents score conviction and risk continuously</span>
               </div>
               <div className="flex items-start gap-3">
                 <span className="text-hud-success">3.</span>
-                <span>LLM makes final trading decisions at market open</span>
+                <span>Execution engine manages entries/exits with policy checks</span>
               </div>
               <div className="flex items-start gap-3">
                 <span className="text-hud-success">4.</span>
-                <span>Automatic stop-loss and take-profit protection</span>
+                <span>Automatic stop-loss/take-profit and risk limits stay enforced</span>
               </div>
             </div>
 
@@ -157,31 +157,31 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
         {step === 2 && (
           <div className="space-y-6">
             <div>
-              <h3 className="hud-label mb-4 text-hud-primary">Alpaca Trading Account</h3>
+              <h3 className="hud-label mb-4 text-hud-primary">Kalshi Trading Account</h3>
               <p className="text-xs text-hud-text-dim mb-4">
                 Get your API keys from{' '}
-                <a href="https://app.alpaca.markets" target="_blank" rel="noopener noreferrer" className="text-hud-primary hover:underline">
-                  app.alpaca.markets
+                <a href="https://demo.kalshi.co" target="_blank" rel="noopener noreferrer" className="text-hud-primary hover:underline">
+                  demo.kalshi.co
                 </a>
               </p>
               
               <div className="space-y-3">
                 <div>
-                  <label className="hud-label block mb-1">API Key</label>
+                  <label className="hud-label block mb-1">API Key ID</label>
                   <input
                     type="text"
                     className="hud-input w-full"
-                    placeholder="PK..."
+                    placeholder="kalshi_key_id..."
                     value={alpacaKey}
                     onChange={e => setAlpacaKey(e.target.value)}
                   />
                 </div>
                 <div>
-                  <label className="hud-label block mb-1">API Secret</label>
+                  <label className="hud-label block mb-1">Private Key (PKCS#8)</label>
                   <input
                     type="password"
                     className="hud-input w-full"
-                    placeholder="Secret key..."
+                    placeholder="-----BEGIN PRIVATE KEY-----"
                     value={alpacaSecret}
                     onChange={e => setAlpacaSecret(e.target.value)}
                   />
@@ -195,7 +195,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
                     className="accent-hud-primary"
                   />
                   <label htmlFor="paperMode" className="hud-label">
-                    Paper Trading Mode (recommended for testing)
+                    Demo Mode (recommended for testing)
                   </label>
                 </div>
               </div>
