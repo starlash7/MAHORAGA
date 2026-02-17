@@ -12,9 +12,21 @@ import { Tooltip, TooltipContent } from './components/Tooltip'
 import type { Status, Config, LogEntry, Signal, Position, SignalResearch, PortfolioSnapshot } from './types'
 
 const API_BASE = '/api'
+const API_TOKEN_KEY = 'nelna_api_token'
+const LEGACY_API_TOKEN_KEY = 'mahoraga_api_token'
 
 function getApiToken(): string {
-  return localStorage.getItem('mahoraga_api_token') || (window as unknown as { VITE_MAHORAGA_API_TOKEN?: string }).VITE_MAHORAGA_API_TOKEN || ''
+  const env = window as unknown as {
+    VITE_NELNA_API_TOKEN?: string
+    VITE_MAHORAGA_API_TOKEN?: string
+  }
+  return (
+    localStorage.getItem(API_TOKEN_KEY) ||
+    localStorage.getItem(LEGACY_API_TOKEN_KEY) ||
+    env.VITE_NELNA_API_TOKEN ||
+    env.VITE_MAHORAGA_API_TOKEN ||
+    ''
+  )
 }
 
 function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
@@ -379,9 +391,9 @@ export default function App() {
                   <input
                     type="password"
                     className="hud-input w-full mb-2"
-                    placeholder="Enter MAHORAGA_API_TOKEN"
-                    defaultValue={localStorage.getItem('mahoraga_api_token') || ''}
-                    onChange={(e) => localStorage.setItem('mahoraga_api_token', e.target.value)}
+                    placeholder="Enter API token (MAHORAGA_API_TOKEN)"
+                    defaultValue={localStorage.getItem(API_TOKEN_KEY) || localStorage.getItem(LEGACY_API_TOKEN_KEY) || ''}
+                    onChange={(e) => localStorage.setItem(API_TOKEN_KEY, e.target.value)}
                   />
                   <button 
                     onClick={() => window.location.reload()}
@@ -412,7 +424,7 @@ export default function App() {
           <div className="flex items-center gap-4 md:gap-6">
             <div className="flex items-baseline gap-2">
               <span className="text-xl md:text-2xl font-light tracking-tight text-hud-text-bright">
-                MAHORAGA PM
+                NELNA PM
               </span>
               <span className="hud-label">v2</span>
             </div>

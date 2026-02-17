@@ -1,12 +1,12 @@
 ⚠️ **Warning:** This software is provided for educational and informational purposes only. Nothing in this repository constitutes financial, investment, legal, or tax advice.
 
-# MAHORAGA
+# NELNA
 
 An autonomous, LLM-powered prediction market agent that runs 24/7 on Cloudflare Workers.
 
 [![Discord](https://img.shields.io/discord/1467592472158015553?color=7289da&label=Discord&logo=discord&logoColor=white)](https://discord.gg/vMFnHe2YBh)
 
-MAHORAGA supports broker abstraction (`kalshi` / `alpaca`) and now ships with a Kalshi mock mode for prediction market development. It runs as a Cloudflare Durable Object with persistent state and automatic restarts.
+NELNA supports broker abstraction (`kalshi` / `alpaca`) and now ships with a Kalshi mock mode for prediction market development. It runs as a Cloudflare Durable Object with persistent state and automatic restarts.
 
 <img width="1278" height="957" alt="dashboard" src="https://github.com/user-attachments/assets/56473ab6-e2c6-45fc-9e32-cf85e69f1a2d" />
 
@@ -34,8 +34,8 @@ MAHORAGA supports broker abstraction (`kalshi` / `alpaca`) and now ships with a 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/ygwyg/MAHORAGA.git
-cd mahoraga
+git clone https://github.com/<your-username>/nelna.git
+cd nelna
 npm install
 ```
 
@@ -43,7 +43,7 @@ npm install
 
 ```bash
 # Create D1 database
-npx wrangler d1 create mahoraga-db
+npx wrangler d1 create nelna-db
 # Copy the database_id to wrangler.jsonc
 
 # Create KV namespace
@@ -51,7 +51,7 @@ npx wrangler kv namespace create CACHE
 # Copy the id to wrangler.jsonc
 
 # Run migrations
-npx wrangler d1 migrations apply mahoraga-db
+npx wrangler d1 migrations apply nelna-db
 ```
 
 ### 3. Set secrets
@@ -111,27 +111,27 @@ All API endpoints require authentication via Bearer token:
 
 ```bash
 # Set your API token as an env var for convenience
-export MAHORAGA_TOKEN="your-api-token"
+export NELNA_TOKEN="your-api-token"
 
 # Enable the agent
-curl -H "Authorization: Bearer $MAHORAGA_TOKEN" \
-  https://mahoraga.bernardoalmeida2004.workers.dev/agent/enable
+curl -H "Authorization: Bearer $NELNA_TOKEN" \
+  https://<your-worker>.workers.dev/agent/enable
 ```
 
 ### 6. Monitor
 
 ```bash
 # Check status
-curl -H "Authorization: Bearer $MAHORAGA_TOKEN" \
-  https://mahoraga.bernardoalmeida2004.workers.dev/agent/status
+curl -H "Authorization: Bearer $NELNA_TOKEN" \
+  https://<your-worker>.workers.dev/agent/status
 
 # View logs
-curl -H "Authorization: Bearer $MAHORAGA_TOKEN" \
-  https://mahoraga.bernardoalmeida2004.workers.dev/agent/logs
+curl -H "Authorization: Bearer $NELNA_TOKEN" \
+  https://<your-worker>.workers.dev/agent/logs
 
 # Emergency kill switch (uses separate KILL_SWITCH_SECRET)
 curl -H "Authorization: Bearer $KILL_SWITCH_SECRET" \
-  https://mahoraga.bernardoalmeida2004.workers.dev/agent/kill
+  https://<your-worker>.workers.dev/agent/kill
 
 # Run dashboard locally
 cd dashboard && npm install && npm run dev
@@ -147,7 +147,7 @@ npx wrangler dev
 cd dashboard && npm run dev
 
 # Terminal 3 - Enable the agent
-curl -H "Authorization: Bearer $MAHORAGA_TOKEN" \
+curl -H "Authorization: Bearer $NELNA_TOKEN" \
   http://localhost:8787/agent/enable
 ```
 
@@ -186,7 +186,7 @@ See `docs/harness.html` for detailed customization guide.
 
 ### LLM Provider Configuration
 
-MAHORAGA supports multiple LLM providers via three modes:
+NELNA supports multiple LLM providers via three modes:
 
 | Mode | Description | Required Env Vars |
 |------|-------------|-------------------|
@@ -242,7 +242,7 @@ npx wrangler secret put ANTHROPIC_API_KEY # Your Anthropic API key
 All `/agent/*` endpoints require Bearer token authentication using `MAHORAGA_API_TOKEN`:
 
 ```bash
-curl -H "Authorization: Bearer $MAHORAGA_TOKEN" https://mahoraga.bernardoalmeida2004.workers.dev/agent/status
+curl -H "Authorization: Bearer $NELNA_TOKEN" https://<your-worker>.workers.dev/agent/status
 ```
 
 Generate a secure token: `openssl rand -base64 48`
@@ -252,7 +252,7 @@ Generate a secure token: `openssl rand -base64 48`
 The `/agent/kill` endpoint uses a separate `KILL_SWITCH_SECRET` for emergency shutdown:
 
 ```bash
-curl -H "Authorization: Bearer $KILL_SWITCH_SECRET" https://mahoraga.bernardoalmeida2004.workers.dev/agent/kill
+curl -H "Authorization: Bearer $KILL_SWITCH_SECRET" https://<your-worker>.workers.dev/agent/kill
 ```
 
 This immediately disables the agent, cancels all alarms, and clears the signal cache.
@@ -268,7 +268,7 @@ For additional security with SSO/email verification, set up Cloudflare Access:
 # 2. Run the setup script
 CLOUDFLARE_API_TOKEN=your-token \
 CLOUDFLARE_ACCOUNT_ID=your-account-id \
-MAHORAGA_WORKER_URL=https://mahoraga.your-subdomain.workers.dev \
+MAHORAGA_WORKER_URL=https://nelna.your-subdomain.workers.dev \
 MAHORAGA_ALLOWED_EMAILS=you@example.com \
 npm run setup:access
 ```
@@ -278,7 +278,7 @@ This creates a Cloudflare Access Application with email verification or One-Time
 ## Project Structure
 
 ```
-mahoraga/
+nelna/
 ├── wrangler.jsonc              # Cloudflare Workers config
 ├── src/
 │   ├── index.ts                # Entry point

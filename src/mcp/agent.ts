@@ -147,7 +147,7 @@ function parsePredictionMarketPayload(symbol: string, payload: unknown): Predict
 
 export class MahoragaMcpAgent extends McpAgent<Env> {
   server = new McpServer({
-    name: "mahoraga",
+    name: "nelna",
     version: "0.1.0",
   });
 
@@ -1626,9 +1626,9 @@ export class MahoragaMcpAgent extends McpAgent<Env> {
   }
 
   private registerUtilityTools(brokerName: "alpaca" | "kalshi") {
-    this.server.tool("help-usage", "Get help information about using Mahoraga", {}, async () => {
+    this.server.tool("help-usage", "Get help information about using Nelna", {}, async () => {
       const result = success({
-        name: "Mahoraga MCP Trading Server",
+        name: "Nelna MCP Trading Server",
         version: "0.1.0",
         order_flow:
           brokerName === "kalshi"

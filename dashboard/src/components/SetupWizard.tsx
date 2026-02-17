@@ -55,7 +55,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
 
   return (
     <div className="min-h-screen bg-hud-bg flex items-center justify-center p-6">
-      <Panel title="MAHORAGA SETUP" className="w-full max-w-xl">
+      <Panel title="NELNA SETUP" className="w-full max-w-xl">
         {step === 0 && (
           <div className="space-y-6">
             <div className="text-center py-2">
@@ -118,7 +118,7 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
         {step === 1 && (
           <div className="space-y-6">
             <div className="text-center py-4">
-              <h2 className="text-2xl font-light text-hud-text-bright mb-2">Welcome to Mahoraga</h2>
+              <h2 className="text-2xl font-light text-hud-text-bright mb-2">Welcome to Nelna</h2>
               <p className="text-hud-text-dim text-sm">
                 Prediction-market automation powered by probability signals and AI analysis
               </p>

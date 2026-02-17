@@ -52,7 +52,7 @@ export default {
     if (url.pathname === "/") {
       return new Response(
         JSON.stringify({
-          name: "mahoraga",
+          name: "nelna",
           version: "0.3.0",
           description: "Autonomous LLM-powered trading agent for prediction markets on Cloudflare Workers",
           endpoints: {

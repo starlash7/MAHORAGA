@@ -12,7 +12,7 @@ interface SettingsModalProps {
 export function SettingsModal({ config, broker = 'kalshi', onSave, onClose }: SettingsModalProps) {
   const [localConfig, setLocalConfig] = useState<Config>(config)
   const [saving, setSaving] = useState(false)
-  const [apiToken, setApiToken] = useState(localStorage.getItem('mahoraga_api_token') || '')
+  const [apiToken, setApiToken] = useState(localStorage.getItem('nelna_api_token') || localStorage.getItem('mahoraga_api_token') || '')
   const isKalshi = broker === 'kalshi'
 
   // Note: We intentionally do NOT sync localConfig with the config prop after initial mount.
@@ -20,8 +20,10 @@ export function SettingsModal({ config, broker = 'kalshi', onSave, onClose }: Se
 
   const handleTokenSave = () => {
     if (apiToken) {
-      localStorage.setItem('mahoraga_api_token', apiToken)
+      localStorage.setItem('nelna_api_token', apiToken)
+      localStorage.removeItem('mahoraga_api_token')
     } else {
+      localStorage.removeItem('nelna_api_token')
       localStorage.removeItem('mahoraga_api_token')
     }
     window.location.reload()
@@ -70,14 +72,14 @@ export function SettingsModal({ config, broker = 'kalshi', onSave, onClose }: Se
                 className="hud-input flex-1"
                 value={apiToken}
                 onChange={e => setApiToken(e.target.value)}
-                placeholder="Enter MAHORAGA_API_TOKEN"
+                placeholder="Enter API token (MAHORAGA_API_TOKEN)"
               />
               <button className="hud-button" onClick={handleTokenSave}>
                 Save & Reload
               </button>
             </div>
             <p className="text-[9px] text-hud-text-dim mt-1">
-              Your MAHORAGA_API_TOKEN from Cloudflare secrets. Required for all API access.
+              Use your MAHORAGA_API_TOKEN from Cloudflare secrets. Required for all API access.
             </p>
           </div>
 

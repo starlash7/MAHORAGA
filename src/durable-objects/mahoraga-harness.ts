@@ -1402,7 +1402,7 @@ export class MahoragaHarness extends DurableObject<Env> {
           ],
           description: "High sentiment detected, researching...",
           timestamp: new Date().toISOString(),
-          footer: { text: "MAHORAGA • Not financial advice • DYOR" },
+          footer: { text: "NELNA • Not financial advice • DYOR" },
         };
       } else {
         const verdictEmoji = data.verdict === "BUY" ? "✅" : data.verdict === "SKIP" ? "⏭️" : "⏸️";
@@ -1417,7 +1417,7 @@ export class MahoragaHarness extends DurableObject<Env> {
             { name: "Sentiment", value: `${((data.sentiment || 0) * 100).toFixed(0)}%`, inline: true },
           ],
           timestamp: new Date().toISOString(),
-          footer: { text: "MAHORAGA • Not financial advice • DYOR" },
+          footer: { text: "NELNA • Not financial advice • DYOR" },
         };
 
         if (data.reasoning) {
