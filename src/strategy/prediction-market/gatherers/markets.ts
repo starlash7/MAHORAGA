@@ -1,6 +1,6 @@
 import type { Signal } from "../../../core/types";
 import { createError, ErrorCode } from "../../../lib/errors";
-import { createKalshiClient } from "../../../providers/kalshi/client";
+import { createKalshiClient, type KalshiClient } from "../../../providers/kalshi/client";
 import type { Gatherer, StrategyContext } from "../../types";
 
 interface KalshiMarketPayload {
@@ -30,6 +30,7 @@ type PredictionStateMap = Record<string, PredictionMarketState>;
 
 const DEFAULT_WATCHLIST = ["USREC-2026", "FEDCUT-2026Q2", "BTC-2026-120K", "SNP-2026-6500"];
 const EMA_ALPHA = 0.2;
+const LIVE_STATUS_ALLOWLIST = new Set(["open", "active", "initialized", "listed"]);
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -132,35 +133,41 @@ function computeSentiment(
 
 async function fetchLiveProbability(
   ctx: StrategyContext,
-  symbol: string
+  symbol: string,
+  client: KalshiClient | null
 ): Promise<{
   probability: number | null;
   spreadCents: number | null;
   status: string | null;
 }> {
-  if (!ctx.env.KALSHI_API_KEY_ID || !ctx.env.KALSHI_API_PRIVATE_KEY) {
+  const liveClient =
+    client ??
+    (ctx.env.KALSHI_API_KEY_ID && ctx.env.KALSHI_API_PRIVATE_KEY
+      ? createKalshiClient({
+          accessKeyId: ctx.env.KALSHI_API_KEY_ID,
+          privateKey: ctx.env.KALSHI_API_PRIVATE_KEY,
+          baseUrl: ctx.env.KALSHI_BASE_URL,
+        })
+      : null);
+
+  if (!liveClient) {
     throw createError(
       ErrorCode.INVALID_INPUT,
       "KALSHI_API_KEY_ID and KALSHI_API_PRIVATE_KEY are required for live prediction gatherer"
     );
   }
 
-  const client = createKalshiClient({
-    accessKeyId: ctx.env.KALSHI_API_KEY_ID,
-    privateKey: ctx.env.KALSHI_API_PRIVATE_KEY,
-    baseUrl: ctx.env.KALSHI_BASE_URL,
-  });
-
-  const payload = await client.get<KalshiMarketPayload>(`/trade-api/v2/markets/${encodeURIComponent(symbol)}`);
+  const payload = await liveClient.get<KalshiMarketPayload>(`/trade-api/v2/markets/${encodeURIComponent(symbol)}`);
   return parseMarketProbability(payload);
 }
 
 async function buildSignal(
   ctx: StrategyContext,
   symbol: string,
-  previous: PredictionMarketState | undefined
+  previous: PredictionMarketState | undefined,
+  isMockMode: boolean,
+  liveClient: KalshiClient | null
 ): Promise<{ signal: Signal | null; nextState: PredictionMarketState | null }> {
-  const isMockMode = (ctx.env.KALSHI_MOCK_MODE || "true").toLowerCase() !== "false";
   let probability: number | null = null;
   let spreadCents: number | null = null;
   let status: string | null = null;
@@ -170,7 +177,7 @@ async function buildSignal(
     spreadCents = 5;
     status = "open";
   } else {
-    const live = await fetchLiveProbability(ctx, symbol);
+    const live = await fetchLiveProbability(ctx, symbol, liveClient);
     probability = live.probability;
     spreadCents = live.spreadCents;
     status = live.status;
@@ -180,7 +187,7 @@ async function buildSignal(
     return { signal: null, nextState: null };
   }
 
-  if (status && !["open", "active", "initialized", "listed"].includes(status.toLowerCase())) {
+  if (status && !LIVE_STATUS_ALLOWLIST.has(status.toLowerCase())) {
     return { signal: null, nextState: null };
   }
 
@@ -212,6 +219,15 @@ async function buildSignal(
 }
 
 async function gatherPredictionMarkets(ctx: StrategyContext): Promise<Signal[]> {
+  const isMockMode = (ctx.env.KALSHI_MOCK_MODE || "true").toLowerCase() !== "false";
+  const liveClient =
+    !isMockMode && ctx.env.KALSHI_API_KEY_ID && ctx.env.KALSHI_API_PRIVATE_KEY
+      ? createKalshiClient({
+          accessKeyId: ctx.env.KALSHI_API_KEY_ID,
+          privateKey: ctx.env.KALSHI_API_PRIVATE_KEY,
+          baseUrl: ctx.env.KALSHI_BASE_URL,
+        })
+      : null;
   const heldSymbols = await ctx.broker
     .getPositions()
     .then((positions) => positions.map((position) => position.symbol.toUpperCase()))
@@ -225,14 +241,16 @@ async function gatherPredictionMarkets(ctx: StrategyContext): Promise<Signal[]> 
 
   for (const symbol of symbols) {
     try {
-      const result = await buildSignal(ctx, symbol, state[symbol]);
+      const result = await buildSignal(ctx, symbol, state[symbol], isMockMode, liveClient);
       if (result.signal) {
         signals.push(result.signal);
       }
       if (result.nextState) {
         nextState[symbol] = result.nextState;
       }
-      await ctx.sleep(120);
+      if (!isMockMode) {
+        await ctx.sleep(120);
+      }
     } catch (error) {
       ctx.log("PredictionGatherer", "market_signal_failed", {
         symbol,

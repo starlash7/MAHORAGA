@@ -759,17 +759,23 @@ export class MahoragaHarness extends DurableObject<Env> {
       return;
     }
 
+    const maxPositions = this.state.config.max_positions;
+    const brokerName = getBrokerProviderName(this.env);
     const heldSymbols = new Set(positions.map((p) => p.symbol));
+    let openPositionCount = positions.length;
     const socialSnapshot = this.getSocialSnapshotCache();
+    const signalBySymbol = new Map(this.state.signalCache.map((signal) => [signal.symbol, signal]));
 
     // Strategy exit decisions
     const exits = activeStrategy.selectExits(ctx, positions, account);
     for (const exit of exits) {
       const result = await ctx.broker.sell(exit.symbol, exit.reason);
-      if (result) heldSymbols.delete(exit.symbol);
+      if (result && heldSymbols.delete(exit.symbol)) {
+        openPositionCount = Math.max(0, openPositionCount - 1);
+      }
     }
 
-    if (positions.length >= this.state.config.max_positions || this.state.signalCache.length === 0) return;
+    if (openPositionCount >= maxPositions || this.state.signalCache.length === 0) return;
 
     // Strategy entry decisions from cached research
     const research = Object.values(this.state.signalResearch);
@@ -777,7 +783,7 @@ export class MahoragaHarness extends DurableObject<Env> {
 
     for (const entry of entries) {
       if (heldSymbols.has(entry.symbol)) continue;
-      if (positions.length >= this.state.config.max_positions) break;
+      if (openPositionCount >= maxPositions) break;
 
       let finalConfidence = entry.confidence;
 
@@ -802,10 +808,10 @@ export class MahoragaHarness extends DurableObject<Env> {
 
       // Options routing
       if (entry.useOptions) {
-        if (getBrokerProviderName(this.env) !== "alpaca") {
+        if (brokerName !== "alpaca") {
           this.log("Options", "skipped_non_alpaca_broker", {
             symbol: entry.symbol,
-            broker: getBrokerProviderName(this.env),
+            broker: brokerName,
           });
         } else {
           const contract = await findBestOptionsContract(ctx, entry.symbol, "bullish", account.equity);
@@ -819,21 +825,15 @@ export class MahoragaHarness extends DurableObject<Env> {
       const result = await ctx.broker.buy(entry.symbol, entry.notional, entry.reason);
       if (result) {
         heldSymbols.add(entry.symbol);
-        const originalSignal = this.state.signalCache.find((s) => s.symbol === entry.symbol);
-        const aggregatedSocial = socialSnapshot[entry.symbol];
-        this.state.positionEntries[entry.symbol] = {
-          symbol: entry.symbol,
-          entry_time: Date.now(),
-          entry_price: 0,
-          entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
-          entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
-          entry_sources: aggregatedSocial
-            ? aggregatedSocial.sources
-            : originalSignal?.subreddits || [originalSignal?.source || "research"],
-          entry_reason: entry.reason,
-          peak_price: 0,
-          peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? finalConfidence,
-        };
+        openPositionCount += 1;
+        this.recordPositionEntry(
+          entry.symbol,
+          entry.reason,
+          finalConfidence,
+          "research",
+          signalBySymbol,
+          socialSnapshot
+        );
       }
     }
 
@@ -861,7 +861,9 @@ export class MahoragaHarness extends DurableObject<Env> {
 
         const result = await ctx.broker.sell(rec.symbol, `LLM recommendation: ${rec.reasoning}`);
         if (result) {
-          heldSymbols.delete(rec.symbol);
+          if (heldSymbols.delete(rec.symbol)) {
+            openPositionCount = Math.max(0, openPositionCount - 1);
+          }
           this.log("Analyst", "llm_sell_executed", {
             symbol: rec.symbol,
             confidence: rec.confidence,
@@ -872,7 +874,7 @@ export class MahoragaHarness extends DurableObject<Env> {
       }
 
       if (rec.action === "BUY") {
-        if (positions.length >= this.state.config.max_positions) continue;
+        if (openPositionCount >= maxPositions) continue;
         if (heldSymbols.has(rec.symbol)) continue;
         if (entrySymbols.has(rec.symbol)) continue;
 
@@ -885,25 +887,46 @@ export class MahoragaHarness extends DurableObject<Env> {
 
         const result = await ctx.broker.buy(rec.symbol, notional, rec.reasoning);
         if (result) {
-          const originalSignal = this.state.signalCache.find((s) => s.symbol === rec.symbol);
-          const aggregatedSocial = socialSnapshot[rec.symbol];
           heldSymbols.add(rec.symbol);
-          this.state.positionEntries[rec.symbol] = {
-            symbol: rec.symbol,
-            entry_time: Date.now(),
-            entry_price: 0,
-            entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
-            entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
-            entry_sources: aggregatedSocial
-              ? aggregatedSocial.sources
-              : originalSignal?.subreddits || [originalSignal?.source || "analyst"],
-            entry_reason: rec.reasoning,
-            peak_price: 0,
-            peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? rec.confidence,
-          };
+          openPositionCount += 1;
+          this.recordPositionEntry(
+            rec.symbol,
+            rec.reasoning,
+            rec.confidence,
+            "analyst",
+            signalBySymbol,
+            socialSnapshot
+          );
         }
       }
     }
+  }
+
+  private recordPositionEntry(
+    symbol: string,
+    reason: string,
+    fallbackSentiment: number,
+    fallbackSource: string,
+    signalBySymbol: Map<string, Signal>,
+    socialSnapshot: Record<string, SocialSnapshotCacheEntry>
+  ): void {
+    const originalSignal = signalBySymbol.get(symbol);
+    const aggregatedSocial = socialSnapshot[symbol];
+    const entrySentiment = aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? fallbackSentiment;
+
+    this.state.positionEntries[symbol] = {
+      symbol,
+      entry_time: Date.now(),
+      entry_price: 0,
+      entry_sentiment: entrySentiment,
+      entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
+      entry_sources: aggregatedSocial
+        ? aggregatedSocial.sources
+        : originalSignal?.subreddits || [originalSignal?.source || fallbackSource],
+      entry_reason: reason,
+      peak_price: 0,
+      peak_sentiment: entrySentiment,
+    };
   }
 
   private async executeOptionsOrder(
@@ -1007,8 +1030,11 @@ export class MahoragaHarness extends DurableObject<Env> {
     const [account, positions] = await Promise.all([ctx.broker.getAccount(), ctx.broker.getPositions()]);
     if (!account) return;
 
+    const maxPositions = this.state.config.max_positions;
     const heldSymbols = new Set(positions.map((p) => p.symbol));
+    let openPositionCount = positions.length;
     const socialSnapshot = this.getSocialSnapshotCache();
+    const signalBySymbol = new Map(this.state.signalCache.map((signal) => [signal.symbol, signal]));
 
     this.log("System", "executing_premarket_plan", {
       recommendations: this.state.premarketPlan.recommendations.length,
@@ -1017,7 +1043,10 @@ export class MahoragaHarness extends DurableObject<Env> {
     // Sells first
     for (const rec of this.state.premarketPlan.recommendations) {
       if (rec.action === "SELL" && rec.confidence >= this.state.config.min_analyst_confidence) {
-        await ctx.broker.sell(rec.symbol, `Pre-market plan: ${rec.reasoning}`);
+        const result = await ctx.broker.sell(rec.symbol, `Pre-market plan: ${rec.reasoning}`);
+        if (result && heldSymbols.delete(rec.symbol)) {
+          openPositionCount = Math.max(0, openPositionCount - 1);
+        }
       }
     }
 
@@ -1025,7 +1054,7 @@ export class MahoragaHarness extends DurableObject<Env> {
     for (const rec of this.state.premarketPlan.recommendations) {
       if (rec.action === "BUY" && rec.confidence >= this.state.config.min_analyst_confidence) {
         if (heldSymbols.has(rec.symbol)) continue;
-        if (positions.length >= this.state.config.max_positions) break;
+        if (openPositionCount >= maxPositions) break;
 
         const sizePct = Math.min(20, this.state.config.position_size_pct_of_cash);
         const notional = Math.min(
@@ -1037,21 +1066,8 @@ export class MahoragaHarness extends DurableObject<Env> {
         const result = await ctx.broker.buy(rec.symbol, notional, `Pre-market plan: ${rec.reasoning}`);
         if (result) {
           heldSymbols.add(rec.symbol);
-          const originalSignal = this.state.signalCache.find((s) => s.symbol === rec.symbol);
-          const aggregatedSocial = socialSnapshot[rec.symbol];
-          this.state.positionEntries[rec.symbol] = {
-            symbol: rec.symbol,
-            entry_time: Date.now(),
-            entry_price: 0,
-            entry_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
-            entry_social_volume: aggregatedSocial?.volume ?? originalSignal?.volume ?? 0,
-            entry_sources: aggregatedSocial
-              ? aggregatedSocial.sources
-              : originalSignal?.subreddits || [originalSignal?.source || "premarket"],
-            entry_reason: rec.reasoning,
-            peak_price: 0,
-            peak_sentiment: aggregatedSocial?.sentiment ?? originalSignal?.sentiment ?? 0,
-          };
+          openPositionCount += 1;
+          this.recordPositionEntry(rec.symbol, rec.reasoning, 0, "premarket", signalBySymbol, socialSnapshot);
         }
       }
     }
